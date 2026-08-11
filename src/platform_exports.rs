@@ -3,12 +3,18 @@
 use core::ffi::{c_char, c_void};
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 const MESSAGE_PLATFORM_INITIALIZED: u32 = 0x6da7_ba8f;
 const MESSAGE_USER_GET_LOGGED_IN_USER: u32 = 0x436f_345d;
-const LOCAL_REQUEST_ID: u64 = 1;
+const MESSAGE_USER_GET_ORG_SCOPED_ID: u32 = 0x18f0_b01b;
+const MESSAGE_USER_GET_ACCESS_TOKEN: u32 = 0x06a8_5abe;
+const MESSAGE_IAP_GET_VIEWER_PURCHASES: u32 = 0x3a0f_8419;
+const MESSAGE_RICH_PRESENCE_GET_DESTINATIONS: u32 = 0x586f_2d14;
+const MESSAGE_IAP_GET_PRODUCTS_BY_SKU: u32 = 0x7e9a_caf5;
+const MESSAGE_USER_GET_USER_PROOF: u32 = 0x2281_0483;
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 struct PlatformUser {
@@ -22,28 +28,31 @@ struct PlatformMessage {
 }
 
 static LOCAL_USER: PlatformUser = PlatformUser { id: 1 };
+static EMPTY_ARRAY: u8 = 0;
 static MESSAGE_QUEUE: Mutex<Vec<Box<PlatformMessage>>> = Mutex::new(Vec::new());
 static BOOTSTRAP_MESSAGE_SENT: AtomicBool = AtomicBool::new(false);
 
-fn queue_message(message_type: u32, user: usize) {
+fn queue_message(message_type: u32, user: usize) -> u64 {
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut queue) = MESSAGE_QUEUE.lock() {
         queue.push(Box::new(PlatformMessage {
             message_type,
-            request_id: LOCAL_REQUEST_ID,
+            request_id,
             user,
         }));
     }
+    request_id
 }
 
-fn queue_logged_in_user() {
+fn queue_logged_in_user() -> u64 {
     queue_message(
         MESSAGE_USER_GET_LOGGED_IN_USER,
         (&LOCAL_USER as *const PlatformUser) as usize,
-    );
+    )
 }
 
-fn queue_platform_initialized() {
-    queue_message(MESSAGE_PLATFORM_INITIALIZED, 0);
+fn queue_platform_initialized() -> u64 {
+    queue_message(MESSAGE_PLATFORM_INITIALIZED, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -54,7 +63,7 @@ pub extern "system" fn ovr_RichPresence_GetNextDestinationArrayPage() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_RichPresence_GetDestinations() -> u64 {
     crate::capi::log_call("ovr_RichPresence_GetDestinations");
-    0
+    queue_message(MESSAGE_RICH_PRESENCE_GET_DESTINATIONS, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -180,14 +189,13 @@ pub extern "system" fn ovr_Room_UpdatePrivateRoomJoinPolicy() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_User_GetAccessToken() -> u64 {
     crate::capi::log_call("ovr_User_GetAccessToken");
-    0
+    queue_message(MESSAGE_USER_GET_ACCESS_TOKEN, 0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_User_GetLoggedInUser() -> u64 {
     crate::capi::log_call("ovr_User_GetLoggedInUser");
-    queue_logged_in_user();
-    LOCAL_REQUEST_ID
+    queue_logged_in_user()
 }
 
 #[unsafe(no_mangle)]
@@ -211,14 +219,15 @@ pub extern "system" fn ovr_User_GetNextUserArrayPage() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetOrgScopedID() -> u64 {
+pub extern "system" fn ovr_User_GetOrgScopedID(_user_id: u64) -> u64 {
     crate::capi::log_call("ovr_User_GetOrgScopedID");
-    0
+    queue_message(MESSAGE_USER_GET_ORG_SCOPED_ID, 0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetUserProof() {
+pub extern "system" fn ovr_User_GetUserProof() -> u64 {
     crate::capi::log_call("ovr_User_GetUserProof");
+    queue_message(MESSAGE_USER_GET_USER_PROOF, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -284,12 +293,21 @@ pub extern "system" fn ovr_PopMessage() -> *mut c_void {
         queue_platform_initialized();
         queue_logged_in_user();
     }
-    MESSAGE_QUEUE
+    let message = MESSAGE_QUEUE
         .lock()
         .ok()
-        .and_then(|mut queue| queue.pop())
-        .map(|message| Box::into_raw(message).cast())
-        .unwrap_or(core::ptr::null_mut())
+        .and_then(|mut queue| (!queue.is_empty()).then(|| queue.remove(0)));
+    match message {
+        Some(message) => {
+            let message_type = message.message_type;
+            let raw = Box::into_raw(message).cast::<c_void>();
+            crate::capi::log_call(&format!(
+                "ovr_PopMessage delivered type={message_type:#x} handle={raw:p}"
+            ));
+            raw
+        }
+        None => core::ptr::null_mut(),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -325,15 +343,13 @@ pub unsafe extern "system" fn ovr_PlatformInitializeWindowsAsynchronousEx(
     if !out_result.is_null() {
         unsafe { *out_result = 0 };
     }
-    queue_platform_initialized();
-    LOCAL_REQUEST_ID
+    queue_platform_initialized()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_PlatformInitializeWindowsAsynchronous(_app_id: *const c_char) -> u64 {
     crate::capi::log_call("ovr_PlatformInitializeWindowsAsynchronous");
-    queue_platform_initialized();
-    LOCAL_REQUEST_ID
+    queue_platform_initialized()
 }
 
 #[unsafe(no_mangle)]
@@ -432,12 +448,13 @@ pub extern "system" fn ovr_IAP_GetViewerPurchasesDurableCache() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_IAP_GetViewerPurchases() -> u64 {
     crate::capi::log_call("ovr_IAP_GetViewerPurchases");
-    0
+    queue_message(MESSAGE_IAP_GET_VIEWER_PURCHASES, 0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_IAP_GetProductsBySKU() {
+pub extern "system" fn ovr_IAP_GetProductsBySKU(_skus: *const *const c_char, _count: i32) -> u64 {
     crate::capi::log_call("ovr_IAP_GetProductsBySKU");
+    queue_message(MESSAGE_IAP_GET_PRODUCTS_BY_SKU, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -482,8 +499,9 @@ pub extern "system" fn ovr_Message_IsError(_message: *const c_void) -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetUserProof() {
+pub extern "system" fn ovr_Message_GetUserProof(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetUserProof");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -557,13 +575,15 @@ pub extern "system" fn ovr_Microphone_Destroy() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Destination_GetApiName() {
+pub extern "system" fn ovr_Destination_GetApiName(_obj: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_Destination_GetApiName");
+    c"".as_ptr()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Destination_GetDisplayName() {
+pub extern "system" fn ovr_Destination_GetDisplayName(_obj: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_Destination_GetDisplayName");
+    c"".as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -619,18 +639,24 @@ pub extern "system" fn ovr_DataStore_GetValue() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_DestinationArray_GetElement() {
+pub extern "system" fn ovr_DestinationArray_GetElement(
+    _obj: *const c_void,
+    _index: usize,
+) -> *const c_void {
     crate::capi::log_call("ovr_DestinationArray_GetElement");
+    core::ptr::null()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_DestinationArray_GetSize() {
+pub extern "system" fn ovr_DestinationArray_GetSize(_obj: *const c_void) -> usize {
     crate::capi::log_call("ovr_DestinationArray_GetSize");
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_DestinationArray_HasNextPage() {
+pub extern "system" fn ovr_DestinationArray_HasNextPage(_obj: *const c_void) -> bool {
     crate::capi::log_call("ovr_DestinationArray_HasNextPage");
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -704,8 +730,9 @@ pub extern "system" fn ovr_Room_GetUsers() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_OrgScopedID_GetID() {
+pub extern "system" fn ovr_OrgScopedID_GetID(_obj: *const c_void) -> u64 {
     crate::capi::log_call("ovr_OrgScopedID_GetID");
+    LOCAL_USER.id
 }
 
 #[unsafe(no_mangle)]
@@ -729,38 +756,51 @@ pub extern "system" fn ovr_Product_GetSKU() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_ProductArray_GetElement() {
+pub extern "system" fn ovr_ProductArray_GetElement(
+    _obj: *const c_void,
+    _index: usize,
+) -> *const c_void {
     crate::capi::log_call("ovr_ProductArray_GetElement");
+    core::ptr::null()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_ProductArray_GetSize() {
+pub extern "system" fn ovr_ProductArray_GetSize(_obj: *const c_void) -> usize {
     crate::capi::log_call("ovr_ProductArray_GetSize");
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_ProductArray_HasNextPage() {
+pub extern "system" fn ovr_ProductArray_HasNextPage(_obj: *const c_void) -> bool {
     crate::capi::log_call("ovr_ProductArray_HasNextPage");
+    false
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Purchase_GetSKU() {
+pub extern "system" fn ovr_Purchase_GetSKU(_obj: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_Purchase_GetSKU");
+    c"".as_ptr()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PurchaseArray_GetElement() {
+pub extern "system" fn ovr_PurchaseArray_GetElement(
+    _obj: *const c_void,
+    _index: usize,
+) -> *const c_void {
     crate::capi::log_call("ovr_PurchaseArray_GetElement");
+    core::ptr::null()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PurchaseArray_GetSize() {
+pub extern "system" fn ovr_PurchaseArray_GetSize(_obj: *const c_void) -> usize {
     crate::capi::log_call("ovr_PurchaseArray_GetSize");
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PurchaseArray_HasNextPage() {
+pub extern "system" fn ovr_PurchaseArray_HasNextPage(_obj: *const c_void) -> bool {
     crate::capi::log_call("ovr_PurchaseArray_HasNextPage");
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -814,8 +854,9 @@ pub extern "system" fn ovr_UserAndRoomArray_HasNextPage() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_UserProof_GetNonce() {
+pub extern "system" fn ovr_UserProof_GetNonce(_obj: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_UserProof_GetNonce");
+    c"local-user-proof".as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -839,8 +880,9 @@ pub extern "system" fn ovr_Message_GetUserAndRoomArray() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetDestinationArray() {
+pub extern "system" fn ovr_Message_GetDestinationArray(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetDestinationArray");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -849,13 +891,15 @@ pub extern "system" fn ovr_Message_GetError() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetOrgScopedID() {
+pub extern "system" fn ovr_Message_GetOrgScopedID(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetOrgScopedID");
+    (&LOCAL_USER as *const PlatformUser).cast()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetProductArray() {
+pub extern "system" fn ovr_Message_GetProductArray(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetProductArray");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -864,8 +908,9 @@ pub extern "system" fn ovr_Message_GetPurchase() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetPurchaseArray() {
+pub extern "system" fn ovr_Message_GetPurchaseArray(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetPurchaseArray");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -875,8 +920,9 @@ pub unsafe extern "system" fn ovr_Message_GetRequestID(message: *const c_void) -
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetString() {
+pub extern "system" fn ovr_Message_GetString(_obj: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_Message_GetString");
+    c"local-access-token".as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -903,13 +949,15 @@ pub extern "system" fn ovrID_FromString() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovrLaunchType_ToString() {
+pub extern "system" fn ovrLaunchType_ToString(_value: i32) -> *const c_char {
     crate::capi::log_call("ovrLaunchType_ToString");
+    c"Unknown".as_ptr()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovrRoomJoinPolicy_ToString() {
+pub extern "system" fn ovrRoomJoinPolicy_ToString(_value: i32) -> *const c_char {
     crate::capi::log_call("ovrRoomJoinPolicy_ToString");
+    c"Unknown".as_ptr()
 }
 
 #[unsafe(no_mangle)]
