@@ -1,6 +1,23 @@
 #include <windows.h>
 #include <wchar.h>
 
+static int remote_load_library(HANDLE process, const wchar_t *path) {
+    SIZE_T bytes = (wcslen(path) + 1) * sizeof(*path);
+    void *remote_path = VirtualAllocEx(process, NULL, bytes,
+                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote_path || !WriteProcessMemory(process, remote_path, path, bytes, NULL)) return 0;
+
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    FARPROC load_library = GetProcAddress(kernel32, "LoadLibraryW");
+    HANDLE thread = CreateRemoteThread(process, NULL, 0,
+        (LPTHREAD_START_ROUTINE)load_library, remote_path, 0, NULL);
+    if (!thread || WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0) return 0;
+    DWORD module = 0;
+    GetExitCodeThread(thread, &module);
+    CloseHandle(thread);
+    return module != 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
     if (argc != 2) return 64;
 
@@ -20,28 +37,9 @@ int wmain(int argc, wchar_t **argv) {
     if (!CreateProcessW(argv[1], command, NULL, NULL, FALSE,
                         CREATE_SUSPENDED, NULL, NULL, &startup, &process)) return 65;
 
-    SIZE_T bytes = (wcslen(bypass_path) + 1) * sizeof(*bypass_path);
-    void *remote_path = VirtualAllocEx(process.hProcess, NULL, bytes,
-                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remote_path || !WriteProcessMemory(process.hProcess, remote_path, bypass_path, bytes, NULL)) {
-        TerminateProcess(process.hProcess, 66);
-        return 66;
-    }
-
-    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    FARPROC load_library = GetProcAddress(kernel32, "LoadLibraryW");
-    HANDLE thread = CreateRemoteThread(process.hProcess, NULL, 0,
-        (LPTHREAD_START_ROUTINE)load_library, remote_path, 0, NULL);
-    if (!thread || WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0) {
+    if (!remote_load_library(process.hProcess, bypass_path)) {
         TerminateProcess(process.hProcess, 67);
         return 67;
-    }
-    DWORD module = 0;
-    GetExitCodeThread(thread, &module);
-    CloseHandle(thread);
-    if (!module) {
-        TerminateProcess(process.hProcess, 68);
-        return 68;
     }
 
     ResumeThread(process.hThread);

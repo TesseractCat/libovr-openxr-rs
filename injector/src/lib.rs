@@ -4,7 +4,12 @@ use core::ffi::c_void;
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 const ECHO_LOADER_SIGNATURE_CHECK_RVA: usize = 0x0136_5bd0;
+// pnsovr compares the already-loaded Platform DLL path against the Oculus
+// runtime path and rejects the normal game-directory dependency as
+// `PreLoaded` before resolving its initialization exports.
+const PNS_PLATFORM_PRELOADED_BRANCH_RVA: usize = 0x0009_8b5a;
 
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
@@ -16,6 +21,17 @@ extern "system" {
     ) -> i32;
     fn FlushInstructionCache(process: *mut c_void, address: *const c_void, size: usize) -> i32;
     fn GetCurrentProcess() -> *mut c_void;
+    fn CreateThread(
+        attributes: *mut c_void,
+        stack_size: usize,
+        start: unsafe extern "system" fn(*mut c_void) -> u32,
+        parameter: *mut c_void,
+        flags: u32,
+        thread_id: *mut u32,
+    ) -> *mut c_void;
+    fn Sleep(milliseconds: u32);
+    fn GetCurrentThread() -> *mut c_void;
+    fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
 }
 
 /// This is loaded through Wine's AppInit_DLLs support before Echo begins its
@@ -58,7 +74,45 @@ pub unsafe extern "system" fn DllMain(
     let mut ignored = 0;
     let _ = VirtualProtect(target.cast(), 6, old_protect, &mut ignored);
     let _ = FlushInstructionCache(GetCurrentProcess(), target.cast(), 6);
+
+    // pnsovr is loaded later by Echo. Patch only its in-memory local
+    // PreLoaded rejection branch once it appears; game files stay untouched.
+    let _ = CreateThread(
+        core::ptr::null_mut(),
+        0,
+        patch_pns_platform_preloaded_rejection,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+    );
     1
+}
+
+unsafe extern "system" fn patch_pns_platform_preloaded_rejection(_parameter: *mut c_void) -> u32 {
+    let pns: [u16; 11] = [
+        b'p' as u16, b'n' as u16, b's' as u16, b'o' as u16, b'v' as u16, b'r' as u16, b'.' as u16,
+        b'd' as u16, b'l' as u16, b'l' as u16, 0,
+    ];
+    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    loop {
+        let base = GetModuleHandleW(pns.as_ptr());
+        if !base.is_null() {
+            let target = (base as usize + PNS_PLATFORM_PRELOADED_BRANCH_RVA) as *mut u8;
+            let mut old_protect = 0;
+            if VirtualProtect(target.cast(), 2, PAGE_EXECUTE_READWRITE, &mut old_protect) != 0 {
+                // 0x74 0x27 (`je`) -> 0xeb 0x27 (`jmp`): proceed to dynamic
+                // Platform API resolution rather than setting result -2.
+                *target = 0xeb;
+                let mut ignored = 0;
+                let _ = VirtualProtect(target.cast(), 2, old_protect, &mut ignored);
+                let _ = FlushInstructionCache(GetCurrentProcess(), target.cast(), 2);
+            }
+            return 0;
+        }
+        // Yield periodically while retaining enough priority to run between
+        // LoadLibrary returning pnsovr and Echo invoking RadPluginInit.
+        Sleep(0);
+    }
 }
 
 // `core` still emits an unwind-personality reference for some Windows target

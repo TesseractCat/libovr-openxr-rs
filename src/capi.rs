@@ -37,7 +37,7 @@ struct D3d11Texture2dDesc {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Guid {
     data1: u32,
     data2: u16,
@@ -56,10 +56,69 @@ type QueryInterface = unsafe extern "system" fn(
     *const Guid,
     *mut *mut core::ffi::c_void,
 ) -> i32;
+type Release = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+type GetDevice = unsafe extern "system" fn(
+    *mut core::ffi::c_void,
+    *const Guid,
+    *mut *mut core::ffi::c_void,
+) -> i32;
+type CreateCommittedResource = unsafe extern "system" fn(
+    *mut core::ffi::c_void,
+    *const D3d12HeapProperties,
+    u32,
+    *const D3d12ResourceDesc,
+    u32,
+    *const core::ffi::c_void,
+    *const Guid,
+    *mut *mut core::ffi::c_void,
+) -> i32;
+
+#[repr(C)]
+struct D3d12HeapProperties {
+    heap_type: u32,
+    cpu_page_property: u32,
+    memory_pool_preference: u32,
+    creation_node_mask: u32,
+    visible_node_mask: u32,
+}
+
+#[repr(C)]
+struct D3d12ResourceDesc {
+    dimension: u32,
+    alignment: u64,
+    width: u64,
+    height: u32,
+    depth_or_array_size: u16,
+    mip_levels: u16,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    layout: u32,
+    flags: u32,
+}
+
+const IID_ID3D12_COMMAND_QUEUE: Guid = Guid {
+    data1: 0x0ec8_70a6,
+    data2: 0x5d7e,
+    data3: 0x4c22,
+    data4: [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed],
+};
+const IID_ID3D12_DEVICE: Guid = Guid {
+    data1: 0x1898_19f1,
+    data2: 0x1db6,
+    data3: 0x4b57,
+    data4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7],
+};
+const IID_ID3D12_RESOURCE: Guid = Guid {
+    data1: 0x6964_42be,
+    data2: 0xa72e,
+    data3: 0x4059,
+    data4: [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad],
+};
 
 static SWAP_TEXTURES: std::sync::Mutex<[usize; 3]> = std::sync::Mutex::new([0; 3]);
 
-fn log_call(name: &str) {
+pub(crate) fn log_call(name: &str) {
     let temp = std::env::var_os("TEMP").unwrap_or_else(|| "C:\\windows\\temp".into());
     let path = std::path::PathBuf::from(temp).join("libovr-openxr.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
@@ -70,8 +129,12 @@ fn log_call(name: &str) {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Initialize(_params: *const OvrInitParams) -> OvrResult {
     log_call("ovr_Initialize");
-    #[cfg(feature = "openxr")]
     if std::env::var_os("LIBOVR_OPENXR_PROBE").is_some() {
+        log_call(&format!(
+            "openxr env XR_RUNTIME_JSON={:?} XDG_RUNTIME_DIR={:?}",
+            std::env::var_os("XR_RUNTIME_JSON"),
+            std::env::var_os("XDG_RUNTIME_DIR")
+        ));
         match crate::openxr_backend::probe() {
             Ok(capabilities) => log_call(&format!(
                 "openxr probe d3d11={} mnd_headless={}",
@@ -260,6 +323,87 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         return -1005;
     }
     let desc = unsafe { *_desc };
+    let device_vtable = unsafe { *(_d3d_device as *const *const *const core::ffi::c_void) };
+    let query_device: QueryInterface = unsafe { core::mem::transmute(*device_vtable.add(0)) };
+    let mut queue = core::ptr::null_mut();
+    let queue_result = unsafe { query_device(_d3d_device, &IID_ID3D12_COMMAND_QUEUE, &mut queue) };
+    if queue_result >= 0 {
+        let queue_vtable = unsafe { *(queue as *const *const *const core::ffi::c_void) };
+        let get_device: GetDevice = unsafe { core::mem::transmute(*queue_vtable.add(7)) };
+        let mut d3d12_device = core::ptr::null_mut();
+        let device_result = unsafe { get_device(queue, &IID_ID3D12_DEVICE, &mut d3d12_device) };
+        let release: Release = unsafe { core::mem::transmute(*queue_vtable.add(2)) };
+        unsafe { release(queue) };
+        if device_result < 0 {
+            log_call(&format!(
+                "ovr_CreateTextureSwapChainDX D3D12 GetDevice failed hr={device_result:#x}"
+            ));
+            return device_result;
+        }
+        let resource_desc = D3d12ResourceDesc {
+            dimension: 3, // D3D12_RESOURCE_DIMENSION_TEXTURE2D
+            alignment: 0,
+            width: desc.width.max(1) as u64,
+            height: desc.height.max(1) as u32,
+            depth_or_array_size: desc.array_size.max(1) as u16,
+            mip_levels: desc.mip_levels.max(1) as u16,
+            format: desc.format as u32,
+            sample_count: desc.sample_count.max(1) as u32,
+            sample_quality: 0,
+            layout: 0, // D3D12_TEXTURE_LAYOUT_UNKNOWN
+            flags: if desc.bind_flags & 0x40 != 0 {
+                0x2
+            } else if desc.bind_flags & 0x20 != 0 {
+                0x1
+            } else {
+                0
+            },
+        };
+        let heap = D3d12HeapProperties {
+            heap_type: 1,
+            cpu_page_property: 0,
+            memory_pool_preference: 0,
+            creation_node_mask: 1,
+            visible_node_mask: 1,
+        };
+        let device_vtable = unsafe { *(d3d12_device as *const *const *const core::ffi::c_void) };
+        let create: CreateCommittedResource =
+            unsafe { core::mem::transmute(*device_vtable.add(27)) };
+        let mut textures = match SWAP_TEXTURES.lock() {
+            Ok(textures) => textures,
+            Err(_) => return -1000,
+        };
+        for texture in textures.iter_mut() {
+            let mut created = core::ptr::null_mut();
+            let result = unsafe {
+                create(
+                    d3d12_device,
+                    &heap,
+                    0,
+                    &resource_desc,
+                    0,
+                    core::ptr::null(),
+                    &IID_ID3D12_RESOURCE,
+                    &mut created,
+                )
+            };
+            if result < 0 {
+                log_call(&format!(
+                    "ovr_CreateTextureSwapChainDX D3D12 CreateCommittedResource failed hr={result:#x}"
+                ));
+                return result;
+            }
+            *texture = created as usize;
+        }
+        let release: Release = unsafe { core::mem::transmute(*device_vtable.add(2)) };
+        unsafe { release(d3d12_device) };
+        log_call(&format!(
+            "ovr_CreateTextureSwapChainDX D3D12 {}x{} format={}",
+            resource_desc.width, resource_desc.height, resource_desc.format
+        ));
+        unsafe { *out_chain = (&SWAP_CHAIN_TOKEN as *const u8).cast_mut().cast() };
+        return OVR_SUCCESS;
+    }
     let d3d_desc = D3d11Texture2dDesc {
         width: desc.width.max(1) as u32,
         height: desc.height.max(1) as u32,
@@ -317,16 +461,18 @@ pub unsafe extern "system" fn ovr_GetTextureSwapChainLength(
 
 /// # Safety
 /// `out_buffer` must be writable and `iid` must identify a D3D interface.
+///
+/// LibOVR declares `IID` by value (a 16-byte GUID), not as a GUID pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_GetTextureSwapChainBufferDX(
     _session: OvrSession,
     _chain: OvrTextureSwapChain,
     index: i32,
-    iid: *const Guid,
+    iid: Guid,
     out_buffer: *mut *mut core::ffi::c_void,
 ) -> OvrResult {
     log_call("ovr_GetTextureSwapChainBufferDX");
-    if iid.is_null() || out_buffer.is_null() || !(0..3).contains(&index) {
+    if out_buffer.is_null() || !(0..3).contains(&index) {
         return -1005;
     }
     let textures = match SWAP_TEXTURES.lock() {
@@ -339,13 +485,17 @@ pub unsafe extern "system" fn ovr_GetTextureSwapChainBufferDX(
     }
     let vtable = unsafe { *(texture as *const *const *const core::ffi::c_void) };
     let query: QueryInterface = unsafe { core::mem::transmute(*vtable.add(0)) };
-    let result = unsafe { query(texture, iid, out_buffer) };
+    let result = unsafe { query(texture, &iid, out_buffer) };
     if result < 0 {
         log_call(&format!(
-            "ovr_GetTextureSwapChainBufferDX failed hr={result:#x}"
+            "ovr_GetTextureSwapChainBufferDX failed hr={result:#x} iid={iid:?}"
         ));
         return result;
     }
+    log_call(&format!(
+        "ovr_GetTextureSwapChainBufferDX ok iid={iid:?} buffer={:p}",
+        unsafe { *out_buffer }
+    ));
     OVR_SUCCESS
 }
 
