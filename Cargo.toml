@@ -1,0 +1,26 @@
+[package]
+name = "libovr-openxr"
+version = "0.1.0"
+edition = "2024"
+description = "LibOVR 1.94 compatibility shim backed by OpenXR"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "libovr_openxr"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enables the real OpenXR backend. Kept out of the initial host-only test loop.
+openxr = []
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+panic = "warn"
+unwrap_used = "warn"

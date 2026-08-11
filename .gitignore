@@ -1,0 +1,10 @@
+/target
+/.rustup
+/.cargo-home
+/.nix-mingw/
+/artifacts/
+vkd3d-proton.cache.write
+Cargo.lock
+*.dll
+*.pdb
+*.exe
