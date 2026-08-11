@@ -12,10 +12,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-# Enables the real OpenXR backend. Kept out of the initial host-only test loop.
-openxr = []
+# Enables dynamic OpenXR-loader discovery. It stays feature-gated so host unit
+# tests remain independent of a runtime, HMD, and graphics driver.
+openxr = ["dep:openxr"]
 
 [dependencies]
+openxr = { version = "0.21.1", optional = true }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

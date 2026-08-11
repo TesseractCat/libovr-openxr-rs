@@ -10,13 +10,54 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::abi::{
-    OVR_SUCCESS, OvrErrorInfo, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrResult,
-    OvrSession, OvrSessionStatus, OvrVersionString,
+    OVR_AUDIO_MAX_DEVICE_STR_SIZE, OVR_EYE_LEFT, OVR_SUCCESS, OvrErrorInfo, OvrEyeRenderDesc,
+    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrResult, OvrSession,
+    OvrSessionStatus, OvrSizei, OvrTextureSwapChain, OvrTextureSwapChainDesc, OvrVector2f,
+    OvrVector3f, OvrVersionString,
 };
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SESSION_TOKEN: u8 = 1;
+static SWAP_CHAIN_TOKEN: u8 = 2;
 static VERSION: &[u8] = b"LibOVR OpenXR shim (bootstrap)\0";
+
+#[repr(C)]
+struct D3d11Texture2dDesc {
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    array_size: u32,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    usage: u32,
+    bind_flags: u32,
+    cpu_access_flags: u32,
+    misc_flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+type CreateTexture2d = unsafe extern "system" fn(
+    *mut core::ffi::c_void,
+    *const D3d11Texture2dDesc,
+    *const core::ffi::c_void,
+    *mut *mut core::ffi::c_void,
+) -> i32;
+type QueryInterface = unsafe extern "system" fn(
+    *mut core::ffi::c_void,
+    *const Guid,
+    *mut *mut core::ffi::c_void,
+) -> i32;
+
+static SWAP_TEXTURES: std::sync::Mutex<[usize; 3]> = std::sync::Mutex::new([0; 3]);
 
 fn log_call(name: &str) {
     let temp = std::env::var_os("TEMP").unwrap_or_else(|| "C:\\windows\\temp".into());
@@ -29,6 +70,16 @@ fn log_call(name: &str) {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Initialize(_params: *const OvrInitParams) -> OvrResult {
     log_call("ovr_Initialize");
+    #[cfg(feature = "openxr")]
+    if std::env::var_os("LIBOVR_OPENXR_PROBE").is_some() {
+        match crate::openxr_backend::probe() {
+            Ok(capabilities) => log_call(&format!(
+                "openxr probe d3d11={} mnd_headless={}",
+                capabilities.d3d11, capabilities.monado_headless
+            )),
+            Err(error) => log_call(&format!("openxr probe failed: {error}")),
+        }
+    }
     INITIALIZED.store(true, Ordering::Release);
     OVR_SUCCESS
 }
@@ -141,6 +192,163 @@ pub extern "system" fn ovr_GetTimeInSeconds() -> f64 {
         .map_or(0.0, |duration| duration.as_secs_f64())
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetFovTextureSize(
+    _session: OvrSession,
+    _eye: OvrEyeType,
+    fov: OvrFovPort,
+    pixels_per_display_pixel: f32,
+) -> OvrSizei {
+    log_call("ovr_GetFovTextureSize");
+    let scale = pixels_per_display_pixel.clamp(0.25, 4.0);
+    let width = ((fov.left_tan + fov.right_tan).max(0.1) * 916.0 * scale).ceil() as i32;
+    let height = ((fov.up_tan + fov.down_tan).max(0.1) * 960.0 * scale).ceil() as i32;
+    OvrSizei {
+        w: width,
+        h: height,
+    }
+}
+
+/// # Safety
+/// `out_guid` must point to `OVR_AUDIO_MAX_DEVICE_STR_SIZE` UTF-16 code units.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceOutGuidStr(out_guid: *mut u16) -> OvrResult {
+    log_call("ovr_GetAudioDeviceOutGuidStr");
+    if out_guid.is_null() {
+        return -1005;
+    }
+    unsafe { core::ptr::write_bytes(out_guid, 0, OVR_AUDIO_MAX_DEVICE_STR_SIZE) };
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetRenderDesc2(
+    _session: OvrSession,
+    eye: OvrEyeType,
+    fov: OvrFovPort,
+) -> OvrEyeRenderDesc {
+    log_call("ovr_GetRenderDesc2");
+    OvrEyeRenderDesc {
+        eye,
+        fov,
+        pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
+        hmd_to_eye_offset: OvrVector3f {
+            x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
+            y: 0.0,
+            z: 0.0,
+        },
+        ..OvrEyeRenderDesc::default()
+    }
+}
+
+/// # Safety
+/// `out_chain` must be writable. The D3D device and descriptor are accepted
+/// for bootstrap only; actual D3D11 resources are implemented in the next
+/// compositor stage.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
+    _session: OvrSession,
+    _d3d_device: *mut core::ffi::c_void,
+    _desc: *const OvrTextureSwapChainDesc,
+    out_chain: *mut OvrTextureSwapChain,
+) -> OvrResult {
+    log_call("ovr_CreateTextureSwapChainDX");
+    if out_chain.is_null() {
+        return -1005;
+    }
+    if _d3d_device.is_null() || _desc.is_null() {
+        return -1005;
+    }
+    let desc = unsafe { *_desc };
+    let d3d_desc = D3d11Texture2dDesc {
+        width: desc.width.max(1) as u32,
+        height: desc.height.max(1) as u32,
+        mip_levels: desc.mip_levels.max(1) as u32,
+        array_size: desc.array_size.max(1) as u32,
+        format: desc.format as u32,
+        sample_count: desc.sample_count.max(1) as u32,
+        sample_quality: 0,
+        usage: 0, // D3D11_USAGE_DEFAULT
+        bind_flags: if desc.bind_flags == 0 {
+            0x28
+        } else {
+            desc.bind_flags
+        },
+        cpu_access_flags: 0,
+        misc_flags: desc.misc_flags,
+    };
+    let vtable = unsafe { *(_d3d_device as *const *const *const core::ffi::c_void) };
+    let create: CreateTexture2d = unsafe { core::mem::transmute(*vtable.add(5)) };
+    let mut textures = match SWAP_TEXTURES.lock() {
+        Ok(textures) => textures,
+        Err(_) => return -1000,
+    };
+    for texture in textures.iter_mut() {
+        let mut created = core::ptr::null_mut();
+        let result = unsafe { create(_d3d_device, &d3d_desc, core::ptr::null(), &mut created) };
+        if result < 0 {
+            log_call(&format!(
+                "ovr_CreateTextureSwapChainDX failed hr={result:#x} format={} {}x{} bind={:#x}",
+                d3d_desc.format, d3d_desc.width, d3d_desc.height, d3d_desc.bind_flags
+            ));
+            return result;
+        }
+        *texture = created as usize;
+    }
+    unsafe { *out_chain = (&SWAP_CHAIN_TOKEN as *const u8).cast_mut().cast() };
+    OVR_SUCCESS
+}
+
+/// # Safety
+/// `out_length` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetTextureSwapChainLength(
+    _session: OvrSession,
+    _chain: OvrTextureSwapChain,
+    out_length: *mut i32,
+) -> OvrResult {
+    log_call("ovr_GetTextureSwapChainLength");
+    if out_length.is_null() {
+        return -1005;
+    }
+    unsafe { *out_length = 3 };
+    OVR_SUCCESS
+}
+
+/// # Safety
+/// `out_buffer` must be writable and `iid` must identify a D3D interface.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetTextureSwapChainBufferDX(
+    _session: OvrSession,
+    _chain: OvrTextureSwapChain,
+    index: i32,
+    iid: *const Guid,
+    out_buffer: *mut *mut core::ffi::c_void,
+) -> OvrResult {
+    log_call("ovr_GetTextureSwapChainBufferDX");
+    if iid.is_null() || out_buffer.is_null() || !(0..3).contains(&index) {
+        return -1005;
+    }
+    let textures = match SWAP_TEXTURES.lock() {
+        Ok(textures) => textures,
+        Err(_) => return -1000,
+    };
+    let texture = textures[index as usize] as *mut core::ffi::c_void;
+    if texture.is_null() {
+        return -1004;
+    }
+    let vtable = unsafe { *(texture as *const *const *const core::ffi::c_void) };
+    let query: QueryInterface = unsafe { core::mem::transmute(*vtable.add(0)) };
+    let result = unsafe { query(texture, iid, out_buffer) };
+    if result < 0 {
+        log_call(&format!(
+            "ovr_GetTextureSwapChainBufferDX failed hr={result:#x}"
+        ));
+        return result;
+    }
+    OVR_SUCCESS
+}
+
 macro_rules! unresolved_exports {
     ($($name:ident),* $(,)?) => {$(
         #[unsafe(no_mangle)]
@@ -161,7 +369,6 @@ unresolved_exports!(
     ovr_CreateMirrorTextureWithOptionsDX,
     ovr_CreateMirrorTextureWithOptionsGL,
     ovr_CreateMirrorTextureWithOptionsVk,
-    ovr_CreateTextureSwapChainDX,
     ovr_CreateTextureSwapChainGL,
     ovr_CreateTextureSwapChainVk,
     ovr_DestroyMirrorTexture,
@@ -172,7 +379,6 @@ unresolved_exports!(
     ovr_GetAudioDeviceInGuidStr,
     ovr_GetAudioDeviceInWaveId,
     ovr_GetAudioDeviceOutGuid,
-    ovr_GetAudioDeviceOutGuidStr,
     ovr_GetAudioDeviceOutWaveId,
     ovr_GetBool,
     ovr_GetBoundaryDimensions,
@@ -186,7 +392,6 @@ unresolved_exports!(
     ovr_GetFloat,
     ovr_GetFloatArray,
     ovr_GetFovStencil,
-    ovr_GetFovTextureSize,
     ovr_GetHmdColorDesc,
     ovr_GetInputState,
     ovr_GetInstanceExtensionsVk,
@@ -196,15 +401,12 @@ unresolved_exports!(
     ovr_GetMirrorTextureBufferVk,
     ovr_GetPerfStats,
     ovr_GetPredictedDisplayTime,
-    ovr_GetRenderDesc2,
     ovr_GetSessionPhysicalDeviceVk,
     ovr_GetString,
-    ovr_GetTextureSwapChainBufferDX,
     ovr_GetTextureSwapChainBufferGL,
     ovr_GetTextureSwapChainBufferVk,
     ovr_GetTextureSwapChainCurrentIndex,
     ovr_GetTextureSwapChainDesc,
-    ovr_GetTextureSwapChainLength,
     ovr_GetTouchHapticsDesc,
     ovr_GetTrackerCount,
     ovr_GetTrackerDesc,

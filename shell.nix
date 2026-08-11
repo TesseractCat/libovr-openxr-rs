@@ -22,6 +22,7 @@ pkgs.mkShell {
     pkgs.binutils
     pkgs.file
     pkgs.python3
+    pkgs.monado
     pkgs.steam-run
     mingw
   ];

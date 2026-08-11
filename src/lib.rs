@@ -7,6 +7,8 @@
 pub mod abi;
 pub mod capi;
 pub mod mock;
+#[cfg(feature = "openxr")]
+pub mod openxr_backend;
 pub mod runtime;
 
 pub use mock::MockRuntime;
