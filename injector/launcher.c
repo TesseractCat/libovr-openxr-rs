@@ -19,27 +19,45 @@ static int remote_load_library(HANDLE process, const wchar_t *path) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-    if (argc != 2) return 64;
+    (void)argv;
+    if (argc != 1) return 64;
 
-    wchar_t bypass_path[MAX_PATH];
-    DWORD length = GetModuleFileNameW(NULL, bypass_path, MAX_PATH);
+    wchar_t launcher_path[MAX_PATH];
+    DWORD length = GetModuleFileNameW(NULL, launcher_path, MAX_PATH);
     if (!length || length == MAX_PATH) return 64;
-    wchar_t *filename = wcsrchr(bypass_path, L'\\');
+    wchar_t *filename = wcsrchr(launcher_path, L'\\');
     if (!filename) return 64;
-    if (_snwprintf(filename + 1, MAX_PATH - (filename + 1 - bypass_path),
-                   L"ovr-loader-bypass.dll") < 0) return 64;
+    size_t directory_length = (size_t)(filename + 1 - launcher_path);
+
+    wchar_t bypass_path[MAX_PATH], runtime_path[MAX_PATH], platform_path[MAX_PATH], game_path[MAX_PATH];
+    if (_snwprintf(game_path, MAX_PATH, L"%.*sechovr.exe",
+                   (int)directory_length, launcher_path) < 0 ||
+        _snwprintf(bypass_path, MAX_PATH, L"%.*sovr-loader-bypass.dll",
+                   (int)directory_length, launcher_path) < 0 ||
+        _snwprintf(runtime_path, MAX_PATH, L"%.*sLibOVRRT64_1.dll",
+                   (int)directory_length, launcher_path) < 0 ||
+        _snwprintf(platform_path, MAX_PATH, L"%.*sLibOVRPlatform64_1.dll",
+                   (int)directory_length, launcher_path) < 0) return 64;
 
     wchar_t command[32768];
-    if (_snwprintf(command, 32768, L"\"%s\"", argv[1]) < 0) return 64;
+    if (_snwprintf(command, 32768, L"\"%s\"", game_path) < 0) return 64;
 
     STARTUPINFOW startup = { .cb = sizeof(startup) };
     PROCESS_INFORMATION process = {0};
-    if (!CreateProcessW(argv[1], command, NULL, NULL, FALSE,
+    if (!CreateProcessW(game_path, command, NULL, NULL, FALSE,
                         CREATE_SUSPENDED, NULL, NULL, &startup, &process)) return 65;
 
-    if (!remote_load_library(process.hProcess, bypass_path)) {
+    // Preload the adjacent shim under the exact two LibOVR module names before
+    // Echo's registry-based loader starts. Windows/Wine module de-duplication
+    // then satisfies later absolute-path loads with these process-local images.
+    if (!remote_load_library(process.hProcess, runtime_path) ||
+        !remote_load_library(process.hProcess, platform_path)) {
         TerminateProcess(process.hProcess, 67);
         return 67;
+    }
+    if (!remote_load_library(process.hProcess, bypass_path)) {
+        TerminateProcess(process.hProcess, 68);
+        return 68;
     }
 
     ResumeThread(process.hThread);
