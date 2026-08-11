@@ -6,6 +6,7 @@
 
 pub mod abi;
 pub mod capi;
+pub mod config;
 pub mod mock;
 pub mod openxr_backend;
 pub mod platform_exports;

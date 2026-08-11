@@ -8,17 +8,31 @@ use std::sync::{
 
 const MESSAGE_PLATFORM_INITIALIZED: u32 = 0x6da7_ba8f;
 const MESSAGE_USER_GET_LOGGED_IN_USER: u32 = 0x436f_345d;
+const MESSAGE_USER_GET_LOGGED_IN_USER_FRIENDS: u32 = 0x587c_2a8d;
 const MESSAGE_USER_GET_ORG_SCOPED_ID: u32 = 0x18f0_b01b;
 const MESSAGE_USER_GET_ACCESS_TOKEN: u32 = 0x06a8_5abe;
 const MESSAGE_IAP_GET_VIEWER_PURCHASES: u32 = 0x3a0f_8419;
 const MESSAGE_RICH_PRESENCE_GET_DESTINATIONS: u32 = 0x586f_2d14;
 const MESSAGE_IAP_GET_PRODUCTS_BY_SKU: u32 = 0x7e9a_caf5;
 const MESSAGE_USER_GET_USER_PROOF: u32 = 0x2281_0483;
+const MESSAGE_NOTIFICATION_GET_ROOM_INVITES: u32 = 0x6f91_6b92;
+const MESSAGE_ROOM_CREATE_AND_JOIN_PRIVATE2: u32 = 0x5a3a_6243;
+const MESSAGE_ROOM_UPDATE_DATA_STORE: u32 = 0x026e_4028;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 struct PlatformUser {
     id: u64,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct KeyValuePair {
+    key: *const c_char,
+    value_type: i32,
+    string_value: *const c_char,
+    int_value: i32,
+    double_value: f64,
 }
 #[repr(C)]
 struct PlatformMessage {
@@ -27,10 +41,23 @@ struct PlatformMessage {
     user: usize,
 }
 
-static LOCAL_USER: PlatformUser = PlatformUser { id: 1 };
 static EMPTY_ARRAY: u8 = 0;
 static MESSAGE_QUEUE: Mutex<Vec<Box<PlatformMessage>>> = Mutex::new(Vec::new());
 static BOOTSTRAP_MESSAGE_SENT: AtomicBool = AtomicBool::new(false);
+
+fn local_user() -> &'static PlatformUser {
+    static USER: std::sync::OnceLock<PlatformUser> = std::sync::OnceLock::new();
+    USER.get_or_init(|| PlatformUser {
+        id: crate::config::user_identity().id,
+    })
+}
+
+fn local_org() -> &'static PlatformUser {
+    static ORG: std::sync::OnceLock<PlatformUser> = std::sync::OnceLock::new();
+    ORG.get_or_init(|| PlatformUser {
+        id: crate::config::user_identity().org_id,
+    })
+}
 
 fn queue_message(message_type: u32, user: usize) -> u64 {
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
@@ -47,7 +74,7 @@ fn queue_message(message_type: u32, user: usize) -> u64 {
 fn queue_logged_in_user() -> u64 {
     queue_message(
         MESSAGE_USER_GET_LOGGED_IN_USER,
-        (&LOCAL_USER as *const PlatformUser) as usize,
+        (local_user() as *const PlatformUser) as usize,
     )
 }
 
@@ -127,8 +154,13 @@ pub extern "system" fn ovr_RoomOptions_SetOrdering() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_CreateAndJoinPrivate2() {
+pub extern "system" fn ovr_Room_CreateAndJoinPrivate2(
+    _join_policy: i32,
+    _max_users: u32,
+    _room_options: *const c_void,
+) -> u64 {
     crate::capi::log_call("ovr_Room_CreateAndJoinPrivate2");
+    queue_message(MESSAGE_ROOM_CREATE_AND_JOIN_PRIVATE2, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -167,8 +199,13 @@ pub extern "system" fn ovr_Room_Leave() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_UpdateDataStore() {
+pub extern "system" fn ovr_Room_UpdateDataStore(
+    _room_id: u64,
+    _data: *const KeyValuePair,
+    _num_items: u32,
+) -> u64 {
     crate::capi::log_call("ovr_Room_UpdateDataStore");
+    queue_message(MESSAGE_ROOM_UPDATE_DATA_STORE, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -199,8 +236,9 @@ pub extern "system" fn ovr_User_GetLoggedInUser() -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetLoggedInUserFriends() {
+pub extern "system" fn ovr_User_GetLoggedInUserFriends() -> u64 {
     crate::capi::log_call("ovr_User_GetLoggedInUserFriends");
+    queue_message(MESSAGE_USER_GET_LOGGED_IN_USER_FRIENDS, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -315,7 +353,7 @@ pub extern "system" fn ovr_GetLoggedInUserID() -> u64 {
     crate::capi::log_call("ovr_GetLoggedInUserID");
     // Echo's offline path still requires a non-zero local principal. Zero
     // produces its "???-0" player records and later a null indirect call.
-    1
+    local_user().id
 }
 
 #[unsafe(no_mangle)]
@@ -427,7 +465,7 @@ pub extern "system" fn ovr_Notification_MarkAsRead() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Notification_GetRoomInvites() -> u64 {
     crate::capi::log_call("ovr_Notification_GetRoomInvites");
-    0
+    queue_message(MESSAGE_NOTIFICATION_GET_ROOM_INVITES, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -505,8 +543,9 @@ pub extern "system" fn ovr_Message_GetUserProof(_obj: *const c_void) -> *const c
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetUserArray() {
+pub extern "system" fn ovr_Message_GetUserArray(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetUserArray");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -615,17 +654,22 @@ pub unsafe extern "system" fn ovr_User_GetID(user: *const c_void) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_User_GetOculusID(_user: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_User_GetOculusID");
-    c"OpenXRLocalUser".as_ptr()
+    crate::config::user_identity().oculus_id.as_ptr()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_UserArray_GetElement() {
+pub extern "system" fn ovr_UserArray_GetElement(
+    _obj: *const c_void,
+    _index: usize,
+) -> *const c_void {
     crate::capi::log_call("ovr_UserArray_GetElement");
+    core::ptr::null()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_UserArray_GetSize() {
+pub extern "system" fn ovr_UserArray_GetSize(_obj: *const c_void) -> usize {
     crate::capi::log_call("ovr_UserArray_GetSize");
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -705,34 +749,39 @@ pub extern "system" fn ovr_Room_GetDataStore() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_GetID() {
+pub extern "system" fn ovr_Room_GetID(_obj: *const c_void) -> u64 {
     crate::capi::log_call("ovr_Room_GetID");
+    local_user().id
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_GetIsMembershipLocked() {
+pub extern "system" fn ovr_Room_GetIsMembershipLocked(_obj: *const c_void) -> bool {
     crate::capi::log_call("ovr_Room_GetIsMembershipLocked");
+    false
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_GetJoinPolicy() {
+pub extern "system" fn ovr_Room_GetJoinPolicy(_obj: *const c_void) -> i32 {
     crate::capi::log_call("ovr_Room_GetJoinPolicy");
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_GetOwner() {
+pub extern "system" fn ovr_Room_GetOwner(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Room_GetOwner");
+    (local_user() as *const PlatformUser).cast()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Room_GetUsers() {
+pub extern "system" fn ovr_Room_GetUsers(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Room_GetUsers");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_OrgScopedID_GetID(_obj: *const c_void) -> u64 {
+pub unsafe extern "system" fn ovr_OrgScopedID_GetID(obj: *const c_void) -> u64 {
     crate::capi::log_call("ovr_OrgScopedID_GetID");
-    LOCAL_USER.id
+    unsafe { obj.cast::<PlatformUser>().as_ref() }.map_or(0, |org| org.id)
 }
 
 #[unsafe(no_mangle)]
@@ -819,18 +868,24 @@ pub extern "system" fn ovr_RoomInviteNotification_GetSentTime() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_RoomInviteNotificationArray_GetElement() {
+pub extern "system" fn ovr_RoomInviteNotificationArray_GetElement(
+    _obj: *const c_void,
+    _index: usize,
+) -> *const c_void {
     crate::capi::log_call("ovr_RoomInviteNotificationArray_GetElement");
+    core::ptr::null()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_RoomInviteNotificationArray_GetSize() {
+pub extern "system" fn ovr_RoomInviteNotificationArray_GetSize(_obj: *const c_void) -> usize {
     crate::capi::log_call("ovr_RoomInviteNotificationArray_GetSize");
+    0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_RoomInviteNotificationArray_HasNextPage() {
+pub extern "system" fn ovr_RoomInviteNotificationArray_HasNextPage(_obj: *const c_void) -> bool {
     crate::capi::log_call("ovr_RoomInviteNotificationArray_HasNextPage");
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -860,8 +915,9 @@ pub extern "system" fn ovr_UserProof_GetNonce(_obj: *const c_void) -> *const c_c
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetRoom() {
+pub extern "system" fn ovr_Message_GetRoom(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetRoom");
+    (local_user() as *const PlatformUser).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -870,8 +926,11 @@ pub extern "system" fn ovr_Message_GetRoomInviteNotification() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetRoomInviteNotificationArray() {
+pub extern "system" fn ovr_Message_GetRoomInviteNotificationArray(
+    _obj: *const c_void,
+) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetRoomInviteNotificationArray");
+    (&EMPTY_ARRAY as *const u8).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -893,7 +952,7 @@ pub extern "system" fn ovr_Message_GetError() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Message_GetOrgScopedID(_obj: *const c_void) -> *const c_void {
     crate::capi::log_call("ovr_Message_GetOrgScopedID");
-    (&LOCAL_USER as *const PlatformUser).cast()
+    (local_org() as *const PlatformUser).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -939,8 +998,18 @@ pub unsafe extern "system" fn ovr_Message_GetUser(message: *const c_void) -> *mu
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovrKeyValuePair_makeString() {
+pub extern "system" fn ovrKeyValuePair_makeString(
+    key: *const c_char,
+    value: *const c_char,
+) -> KeyValuePair {
     crate::capi::log_call("ovrKeyValuePair_makeString");
+    KeyValuePair {
+        key,
+        value_type: 0, // ovrKeyValuePairType_String
+        string_value: value,
+        int_value: 0,
+        double_value: 0.0,
+    }
 }
 
 #[unsafe(no_mangle)]

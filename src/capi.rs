@@ -383,6 +383,10 @@ pub extern "system" fn ovr_GetInputState(
     #[cfg(windows)]
     if let Ok(slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_ref() {
+            state.time_in_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs_f64())
+                .unwrap_or_default();
             for hand in 0..2 {
                 let selected = session.hand_select[hand] || session.hand_primary[hand];
                 if selected {
@@ -396,13 +400,30 @@ pub extern "system" fn ovr_GetInputState(
                 });
                 state.index_trigger[hand] = trigger;
                 state.index_trigger_no_deadzone[hand] = trigger;
+                if trigger > 0.0 {
+                    state.touches |= if hand == 0 { 0x0000_1000 } else { 0x0000_0010 };
+                }
                 state.hand_trigger[hand] = session.hand_squeeze[hand];
                 state.hand_trigger_no_deadzone[hand] = session.hand_squeeze[hand];
+                state.index_trigger_raw[hand] = trigger;
+                state.hand_trigger_raw[hand] = session.hand_squeeze[hand];
                 state.thumbstick[hand] = OvrVector2f {
                     x: session.hand_thumbstick[hand].x,
                     y: session.hand_thumbstick[hand].y,
                 };
                 state.thumbstick_no_deadzone[hand] = state.thumbstick[hand];
+                state.thumbstick_raw[hand] = state.thumbstick[hand];
+                if selected || trigger > 0.0 || session.hand_squeeze[hand] > 0.0 {
+                    log_call(&format!(
+                        "ovr_GetInputState {} buttons={:#x} trigger={:.2} squeeze={:.2} stick=({:.2},{:.2})",
+                        if hand == 0 { "left" } else { "right" },
+                        state.buttons,
+                        trigger,
+                        session.hand_squeeze[hand],
+                        state.thumbstick[hand].x,
+                        state.thumbstick[hand].y,
+                    ));
+                }
             }
         }
     }

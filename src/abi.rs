@@ -147,6 +147,9 @@ pub struct OvrInputState {
     pub index_trigger_no_deadzone: [f32; 2],
     pub hand_trigger_no_deadzone: [f32; 2],
     pub thumbstick_no_deadzone: [OvrVector2f; 2],
+    pub index_trigger_raw: [f32; 2],
+    pub hand_trigger_raw: [f32; 2],
+    pub thumbstick_raw: [OvrVector2f; 2],
 }
 
 #[repr(C)]

@@ -436,6 +436,14 @@ impl D3d12Session {
                 if let Ok(hand_path) = hand_path {
                     if let Ok(state) = self.select_action.state(&self.session, hand_path) {
                         self.hand_select[index] = state.is_active && state.current_state;
+                        if state.changed_since_last_sync {
+                            crate::capi::log_call(&format!(
+                                "OpenXR {} simple select active={} pressed={}",
+                                if index == 0 { "left" } else { "right" },
+                                state.is_active,
+                                state.current_state,
+                            ));
+                        }
                     }
                     if let Ok(state) = self.primary_action.state(&self.session, hand_path) {
                         self.hand_primary[index] = state.is_active && state.current_state;
