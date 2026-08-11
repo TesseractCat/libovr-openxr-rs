@@ -4,7 +4,6 @@
 /.nix-mingw/
 /artifacts/
 vkd3d-proton.cache*
-Cargo.lock
 *.dll
 *.pdb
 *.exe
