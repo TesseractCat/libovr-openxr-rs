@@ -62,7 +62,70 @@ pub struct OvrFovPort {
     pub right_tan: f32,
 }
 
-/// CAPI 1.94 `ovrHmdDesc`. Its layout is required by `ovr_GetHmdDesc`.
+pub type OvrEyeType = i32;
+pub type OvrTextureSwapChain = *mut c_void;
+pub const OVR_EYE_LEFT: OvrEyeType = 0;
+pub const OVR_EYE_RIGHT: OvrEyeType = 1;
+pub const OVR_AUDIO_MAX_DEVICE_STR_SIZE: usize = 128;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrVector2i {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrRecti {
+    pub pos: OvrVector2i,
+    pub size: OvrSizei,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrVector2f {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrVector3f {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+/// CAPI 1.94 `ovrEyeRenderDesc`; returned by value by `ovr_GetRenderDesc2`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrEyeRenderDesc {
+    pub eye: OvrEyeType,
+    pub fov: OvrFovPort,
+    pub distorted_viewport: OvrRecti,
+    pub pixels_per_tan_angle_at_center: OvrVector2f,
+    pub hmd_to_eye_offset: OvrVector3f,
+}
+
+/// CAPI 1.94 `ovrTextureSwapChainDesc`. DX texture creation only needs this
+/// layout at this stage; D3D texture allocation is deliberately deferred.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrTextureSwapChainDesc {
+    pub texture_type: i32,
+    pub format: i32,
+    pub array_size: i32,
+    pub width: i32,
+    pub height: i32,
+    pub mip_levels: i32,
+    pub sample_count: i32,
+    pub static_image: OvrBool,
+    pub misc_flags: u32,
+    pub bind_flags: u32,
+}
+
+/// CAPI 1.94 `ovrHmdDesc`.  Its layout is required by `ovr_GetHmdDesc`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct OvrHmdDesc {

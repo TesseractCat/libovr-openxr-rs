@@ -3,7 +3,7 @@
 /.cargo-home
 /.nix-mingw/
 /artifacts/
-vkd3d-proton.cache.write
+vkd3d-proton.cache*
 Cargo.lock
 *.dll
 *.pdb
