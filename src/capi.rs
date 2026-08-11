@@ -770,7 +770,7 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
         right_tan: 1.0,
     };
     OvrHmdDesc {
-        hmd_type: 15, // ovrHmd_RiftS
+        hmd_type: 16, // ovrHmd_RiftS
         product_name: product,
         manufacturer,
         vendor_id: 0x2833,

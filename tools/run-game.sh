@@ -76,5 +76,5 @@ printf 'launcher: %s\n' "$launcher_target"
 printf 'loader bypass: %s (adjacent to launcher)\n' "$bypass_target"
 printf 'stdout/stderr: %s\n' "$run_dir/proton.{out,err}"
 
-steam-run "$LIBOVR_OPENXR_PROTON" run "$launcher_target" \
+steam-run "$LIBOVR_OPENXR_PROTON" run "$launcher_target" "$@" \
   >"$run_dir/proton.out" 2>"$run_dir/proton.err"

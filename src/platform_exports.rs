@@ -1,4 +1,50 @@
-//! Resolver stubs for pnsovr.dll's LibOVR Platform SDK dependency.
+//! Resolver stubs for pnsovr.dll's platform dependency.
+
+use core::ffi::{c_char, c_void};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+const MESSAGE_PLATFORM_INITIALIZED: u32 = 0x6da7_ba8f;
+const MESSAGE_USER_GET_LOGGED_IN_USER: u32 = 0x436f_345d;
+const LOCAL_REQUEST_ID: u64 = 1;
+
+#[repr(C)]
+struct PlatformUser {
+    id: u64,
+}
+#[repr(C)]
+struct PlatformMessage {
+    message_type: u32,
+    request_id: u64,
+    user: usize,
+}
+
+static LOCAL_USER: PlatformUser = PlatformUser { id: 1 };
+static MESSAGE_QUEUE: Mutex<Vec<Box<PlatformMessage>>> = Mutex::new(Vec::new());
+static BOOTSTRAP_MESSAGE_SENT: AtomicBool = AtomicBool::new(false);
+
+fn queue_message(message_type: u32, user: usize) {
+    if let Ok(mut queue) = MESSAGE_QUEUE.lock() {
+        queue.push(Box::new(PlatformMessage {
+            message_type,
+            request_id: LOCAL_REQUEST_ID,
+            user,
+        }));
+    }
+}
+
+fn queue_logged_in_user() {
+    queue_message(
+        MESSAGE_USER_GET_LOGGED_IN_USER,
+        (&LOCAL_USER as *const PlatformUser) as usize,
+    );
+}
+
+fn queue_platform_initialized() {
+    queue_message(MESSAGE_PLATFORM_INITIALIZED, 0);
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_RichPresence_GetNextDestinationArrayPage() {
@@ -140,7 +186,8 @@ pub extern "system" fn ovr_User_GetAccessToken() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_User_GetLoggedInUser() -> u64 {
     crate::capi::log_call("ovr_User_GetLoggedInUser");
-    0 // invalid ovrRequest: do not create a request with no completion message
+    queue_logged_in_user();
+    LOCAL_REQUEST_ID
 }
 
 #[unsafe(no_mangle)]
@@ -220,16 +267,29 @@ pub extern "system" fn ovr_RichPresenceOptions_Create() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_FreeMessage() {
+pub unsafe extern "system" fn ovr_FreeMessage(message: *mut c_void) {
     crate::capi::log_call("ovr_FreeMessage");
+    if !message.is_null() {
+        unsafe { drop(Box::from_raw(message.cast::<PlatformMessage>())) };
+    }
 }
 
-/// pnsovr resolves this at runtime rather than through its PE import table.
-/// A null message denotes an empty offline Platform SDK queue.
+/// Pop one completion from the local offline message queue.
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PopMessage() -> *mut core::ffi::c_void {
+pub extern "system" fn ovr_PopMessage() -> *mut c_void {
     crate::capi::log_call("ovr_PopMessage");
-    core::ptr::null_mut()
+    // pnsovr may initialize internally before resolving the public Ex export.
+    // Seed the documented init completion followed by the local-user result.
+    if !BOOTSTRAP_MESSAGE_SENT.swap(true, Ordering::AcqRel) {
+        queue_platform_initialized();
+        queue_logged_in_user();
+    }
+    MESSAGE_QUEUE
+        .lock()
+        .ok()
+        .and_then(|mut queue| queue.pop())
+        .map(|message| Box::into_raw(message).cast())
+        .unwrap_or(core::ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -247,17 +307,33 @@ pub extern "system" fn ovr_IsPlatformInitialized() -> u8 {
 }
 
 // pnsovr resolves these initialization functions dynamically rather than
-// importing them. Report success for the local/offline Platform SDK shim.
+// importing them. Report success for the local/offline shim.
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PlatformInitializeWindows() -> i32 {
+pub extern "system" fn ovr_PlatformInitializeWindows(_app_id: *const c_char) -> i32 {
     crate::capi::log_call("ovr_PlatformInitializeWindows");
-    0
+    0 // ovrPlatformInitialize_Success
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_PlatformInitializeWindowsAsynchronous() -> *mut core::ffi::c_void {
+pub unsafe extern "system" fn ovr_PlatformInitializeWindowsAsynchronousEx(
+    _app_id: *const c_char,
+    out_result: *mut i32,
+    _product_version: i32,
+    _major_version: i32,
+) -> u64 {
+    crate::capi::log_call("ovr_PlatformInitializeWindowsAsynchronousEx");
+    if !out_result.is_null() {
+        unsafe { *out_result = 0 };
+    }
+    queue_platform_initialized();
+    LOCAL_REQUEST_ID
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_PlatformInitializeWindowsAsynchronous(_app_id: *const c_char) -> u64 {
     crate::capi::log_call("ovr_PlatformInitializeWindowsAsynchronous");
-    core::ptr::null_mut()
+    queue_platform_initialized();
+    LOCAL_REQUEST_ID
 }
 
 #[unsafe(no_mangle)]
@@ -312,7 +388,7 @@ pub extern "system" fn ovr_Voip_GetPCM() {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Voip_GetOutputBufferMaxSize() -> usize {
     crate::capi::log_call("ovr_Voip_GetOutputBufferMaxSize");
-    // Platform SDK declares this as size_t. A void stub leaves RAX undefined,
+    // This uses `size_t`. A void stub leaves RAX undefined,
     // which makes pnsovr treat an arbitrary value as an audio-buffer size.
     0
 }
@@ -400,8 +476,9 @@ pub extern "system" fn ovr_Packet_Free() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_IsError() {
+pub extern "system" fn ovr_Message_IsError(_message: *const c_void) -> u8 {
     crate::capi::log_call("ovr_Message_IsError");
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -510,13 +587,15 @@ pub extern "system" fn ovr_User_GetPresenceStatus() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetID() {
+pub unsafe extern "system" fn ovr_User_GetID(user: *const c_void) -> u64 {
     crate::capi::log_call("ovr_User_GetID");
+    unsafe { user.cast::<PlatformUser>().as_ref() }.map_or(0, |user| user.id)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetOculusID() {
+pub extern "system" fn ovr_User_GetOculusID(_user: *const c_void) -> *const c_char {
     crate::capi::log_call("ovr_User_GetOculusID");
+    c"OpenXRLocalUser".as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -790,8 +869,9 @@ pub extern "system" fn ovr_Message_GetPurchaseArray() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetRequestID() {
+pub unsafe extern "system" fn ovr_Message_GetRequestID(message: *const c_void) -> u64 {
     crate::capi::log_call("ovr_Message_GetRequestID");
+    unsafe { message.cast::<PlatformMessage>().as_ref() }.map_or(0, |message| message.request_id)
 }
 
 #[unsafe(no_mangle)]
@@ -800,13 +880,16 @@ pub extern "system" fn ovr_Message_GetString() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetType() {
+pub unsafe extern "system" fn ovr_Message_GetType(message: *const c_void) -> u32 {
     crate::capi::log_call("ovr_Message_GetType");
+    unsafe { message.cast::<PlatformMessage>().as_ref() }.map_or(0, |message| message.message_type)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetUser() {
+pub unsafe extern "system" fn ovr_Message_GetUser(message: *const c_void) -> *mut c_void {
     crate::capi::log_call("ovr_Message_GetUser");
+    unsafe { message.cast::<PlatformMessage>().as_ref() }
+        .map_or(core::ptr::null_mut(), |message| message.user as *mut c_void)
 }
 
 #[unsafe(no_mangle)]

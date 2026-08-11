@@ -19,8 +19,8 @@ static int remote_load_library(HANDLE process, const wchar_t *path) {
 }
 
 int wmain(int argc, wchar_t **argv) {
-    (void)argv;
-    if (argc != 1) return 64;
+    // The launcher discovers adjacent echovr.exe itself; remaining arguments
+    // are forwarded as game arguments (for example map/game-type overrides).
 
     wchar_t launcher_path[MAX_PATH];
     DWORD length = GetModuleFileNameW(NULL, launcher_path, MAX_PATH);
@@ -40,7 +40,14 @@ int wmain(int argc, wchar_t **argv) {
                    (int)directory_length, launcher_path) < 0) return 64;
 
     wchar_t command[32768];
-    if (_snwprintf(command, 32768, L"\"%s\"", game_path) < 0) return 64;
+    int command_length = _snwprintf(command, 32768, L"\"%s\"", game_path);
+    if (command_length < 0 || command_length >= 32768) return 64;
+    for (int index = 1; index < argc; ++index) {
+        int written = _snwprintf(command + command_length, 32768 - command_length,
+                                 L" \"%s\"", argv[index]);
+        if (written < 0 || written >= 32768 - command_length) return 64;
+        command_length += written;
+    }
 
     STARTUPINFOW startup = { .cb = sizeof(startup) };
     PROCESS_INFORMATION process = {0};
