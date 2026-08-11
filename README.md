@@ -3,8 +3,9 @@
 A Rust implementation of the **LibOVRRT64_1** CAPI surface required by Echo VR,
 translated to OpenXR. The target is Wine plus a native Linux OpenXR runtime.
 
-> Status: scaffold only. The current DLL exports a few probe functions and
-> deliberately fails `ovr_Initialize`; it cannot run the game yet.
+> Status: Echo now initializes its LibOVR D3D12 swap chains using shim-created
+> `ID3D12Resource` textures. The next blocker is its existing `pnsovr.dll`
+> provider module; OpenXR frame submission is not implemented yet.
 
 ## Layout
 
@@ -78,6 +79,8 @@ package normally does not ship that target. Toolchains and Cargo caches stay in
 nix-shell
 cargo test
 tools/build-windows.sh
+# Starts Monado's simulated HMD/null compositor, then builds, deploys, and runs Echo.
+tools/run-monado-game.sh
 ```
 
 Host checks use Nix-built Rust. `tools/build-windows.sh` explicitly invokes the
@@ -85,8 +88,15 @@ Rustup toolchain pinned in `rust-toolchain.toml`; on its first run Rustup
 downloads Rust 1.93.1 plus the Windows GNU target, Clippy, and rustfmt. The
 Cargo target configuration uses Nix's `x86_64-w64-mingw32-gcc` linker.
 
-The shell also detects a Steam-managed Proton installation and exposes it as
-`$LIBOVR_OPENXR_PROTON`. It does not install or replace Proton.
+The shell detects a Steam-managed Proton installation (preferring Proton
+Experimental) and exposes it as `$LIBOVR_OPENXR_PROTON`. Its Experimental
+prefix is isolated at `artifacts/proton-experimental-prefix`; this avoids
+mixing Wine/OpenXR registry state with earlier Proton 11 tests. It does not
+install or replace Proton.
+
+For repeated headsetless boot attempts, use `tools/run-monado-game.sh` rather
+than manually starting Monado, sourcing its environment, and launching Echo.
+Pass `--no-build` when the Windows DLL is already current.
 
 ## Build targets
 

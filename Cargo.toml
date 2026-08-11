@@ -10,14 +10,10 @@ publish = false
 name = "libovr_openxr"
 crate-type = ["cdylib", "rlib"]
 
-[features]
-default = []
-# Enables dynamic OpenXR-loader discovery. It stays feature-gated so host unit
-# tests remain independent of a runtime, HMD, and graphics driver.
-openxr = ["dep:openxr"]
-
 [dependencies]
-openxr = { version = "0.21.1", optional = true }
+# Dynamic loader discovery keeps the shim independent of an import library and
+# lets Wine/Proton select the platform OpenXR bridge at runtime.
+openxr = "0.21.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

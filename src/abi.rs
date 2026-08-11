@@ -97,6 +97,65 @@ pub struct OvrVector3f {
     pub z: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrQuatf {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrPosef {
+    pub orientation: OvrQuatf,
+    pub position: OvrVector3f,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrPoseStatef {
+    pub pose: OvrPosef,
+    pub angular_velocity: OvrVector3f,
+    pub linear_velocity: OvrVector3f,
+    pub angular_acceleration: OvrVector3f,
+    pub linear_acceleration: OvrVector3f,
+    pub time_in_seconds: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrTrackingState {
+    pub head_pose: OvrPoseStatef,
+    pub hand_poses: [OvrPosef; 2],
+    pub calibrated_origin: OvrPosef,
+    pub status_flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrInputState {
+    pub time_in_seconds: f64,
+    pub buttons: u32,
+    pub touches: u32,
+    pub index_trigger: [f32; 2],
+    pub hand_trigger: [f32; 2],
+    pub thumbstick: [OvrVector2f; 2],
+    pub controller_type: u32,
+    pub index_trigger_no_deadzone: [f32; 2],
+    pub hand_trigger_no_deadzone: [f32; 2],
+    pub thumbstick_no_deadzone: [OvrVector2f; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrTrackerPose {
+    pub pose: OvrPosef,
+    pub leveled_pose: OvrPosef,
+    pub status_flags: u32,
+}
+
 /// CAPI 1.94 `ovrEyeRenderDesc`; returned by value by `ovr_GetRenderDesc2`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

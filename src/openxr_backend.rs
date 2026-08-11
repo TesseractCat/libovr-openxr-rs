@@ -18,6 +18,8 @@ pub struct OpenXrCapabilities {
 pub fn probe() -> Result<OpenXrCapabilities, String> {
     // `Entry::load` dynamically locates the platform OpenXR loader. This is
     // essential for Wine: no OpenXR import library is baked into our DLL.
+    // Wine registers wineopenxr.dll as an OpenXR *runtime*. Applications must
+    // still use the standard OpenXR loader, exactly as they do on Windows.
     let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
     let extensions = entry
         .enumerate_extensions()
@@ -50,4 +52,41 @@ pub fn probe() -> Result<OpenXrCapabilities, String> {
         d3d11,
         monado_headless: extensions.mnd_headless,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires an installed OpenXR runtime"]
+    fn probes_the_active_runtime() {
+        super::probe().expect("OpenXR runtime probe");
+    }
+
+    #[test]
+    #[ignore = "requires an installed OpenXR runtime"]
+    fn probes_vulkan_extensions_used_by_wineopenxr() {
+        let entry = unsafe { openxr::Entry::load() }.expect("OpenXR loader");
+        let available = entry.enumerate_extensions().expect("extension enumeration");
+        eprintln!("available OpenXR extensions: {available:?}");
+
+        for (name, enable_vulkan_1) in [("vulkan1", true), ("vulkan2", false)] {
+            let mut requested = openxr::ExtensionSet::default();
+            requested.khr_vulkan_enable = enable_vulkan_1 && available.khr_vulkan_enable;
+            requested.khr_vulkan_enable2 = !enable_vulkan_1 && available.khr_vulkan_enable2;
+            requested.khr_convert_timespec_time = available.khr_convert_timespec_time;
+            entry
+                .create_instance(
+                    &openxr::ApplicationInfo {
+                        application_name: "libovr-openxr-wine-probe",
+                        application_version: 1,
+                        engine_name: "test",
+                        engine_version: 1,
+                        api_version: openxr::Version::new(1, 0, 0),
+                    },
+                    &requested,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{name} instance creation: {error}"));
+        }
+    }
 }

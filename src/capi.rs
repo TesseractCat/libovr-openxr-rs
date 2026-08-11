@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::abi::{
     OVR_AUDIO_MAX_DEVICE_STR_SIZE, OVR_EYE_LEFT, OVR_SUCCESS, OvrErrorInfo, OvrEyeRenderDesc,
-    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrResult, OvrSession,
-    OvrSessionStatus, OvrSizei, OvrTextureSwapChain, OvrTextureSwapChainDesc, OvrVector2f,
-    OvrVector3f, OvrVersionString,
+    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrInputState, OvrResult,
+    OvrSession, OvrSessionStatus, OvrSizei, OvrTextureSwapChain, OvrTextureSwapChainDesc,
+    OvrTrackerPose, OvrTrackingState, OvrVector2f, OvrVector3f, OvrVersionString,
 };
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -80,6 +80,14 @@ struct D3d12HeapProperties {
     memory_pool_preference: u32,
     creation_node_mask: u32,
     visible_node_mask: u32,
+}
+
+#[repr(C)]
+struct D3d12ClearValue {
+    format: u32,
+    depth: f32,
+    stencil: u8,
+    _padding: [u8; 3],
 }
 
 #[repr(C)]
@@ -171,6 +179,149 @@ pub unsafe extern "system" fn ovr_Create(
             *luid = OvrGraphicsLuid::default();
         }
     }
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTrackingState(
+    _session: OvrSession,
+    absolute_time: f64,
+    _latency_marker: u8,
+) -> OvrTrackingState {
+    log_call("ovr_GetTrackingState");
+    OvrTrackingState {
+        head_pose: crate::abi::OvrPoseStatef {
+            pose: crate::abi::OvrPosef {
+                orientation: crate::abi::OvrQuatf {
+                    w: 1.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            time_in_seconds: absolute_time,
+            ..Default::default()
+        },
+        calibrated_origin: crate::abi::OvrPosef {
+            orientation: crate::abi::OvrQuatf {
+                w: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        // ovrStatus_OrientationTracked | ovrStatus_PositionTracked.
+        status_flags: 0x3,
+        ..Default::default()
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetInputState(
+    _session: OvrSession,
+    controller_type: u32,
+    input_state: *mut OvrInputState,
+) -> OvrResult {
+    log_call("ovr_GetInputState");
+    if input_state.is_null() {
+        return -1005;
+    }
+    unsafe {
+        *input_state = OvrInputState {
+            controller_type,
+            ..Default::default()
+        };
+    }
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTrackerPose(
+    _session: OvrSession,
+    _tracker_pose_index: u32,
+) -> OvrTrackerPose {
+    log_call("ovr_GetTrackerPose");
+    OvrTrackerPose {
+        pose: crate::abi::OvrPosef {
+            orientation: crate::abi::OvrQuatf {
+                w: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        leveled_pose: crate::abi::OvrPosef {
+            orientation: crate::abi::OvrQuatf {
+                w: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        status_flags: 0x3,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetPredictedDisplayTime(_session: OvrSession, _frame_index: i64) -> f64 {
+    log_call("ovr_GetPredictedDisplayTime");
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTextureSwapChainCurrentIndex(
+    _session: OvrSession,
+    _chain: OvrTextureSwapChain,
+    index: *mut i32,
+) -> OvrResult {
+    log_call("ovr_GetTextureSwapChainCurrentIndex");
+    if index.is_null() {
+        return -1005;
+    }
+    unsafe {
+        *index = 0;
+    }
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_CommitTextureSwapChain(
+    _session: OvrSession,
+    _chain: OvrTextureSwapChain,
+) -> OvrResult {
+    log_call("ovr_CommitTextureSwapChain");
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_WaitToBeginFrame(_session: OvrSession, _frame_index: i64) -> OvrResult {
+    log_call("ovr_WaitToBeginFrame");
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_BeginFrame(_session: OvrSession, _frame_index: i64) -> OvrResult {
+    log_call("ovr_BeginFrame");
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_EndFrame(
+    _session: OvrSession,
+    _frame_index: i64,
+    _view_scale_desc: *const core::ffi::c_void,
+    _layer_ptr_list: *const *const core::ffi::c_void,
+    _layer_count: u32,
+) -> OvrResult {
+    log_call("ovr_EndFrame");
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_SubmitControllerVibration(
+    _session: OvrSession,
+    _controller_type: u32,
+    _buffer: *const core::ffi::c_void,
+) -> OvrResult {
+    log_call("ovr_SubmitControllerVibration");
     OVR_SUCCESS
 }
 
@@ -340,6 +491,20 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
             ));
             return device_result;
         }
+        // ovrTextureFormat values are an Oculus enum, not raw DXGI_FORMAT
+        // values. Echo uses RGBA8 sRGB (5) for color and D24S8 (12) for its
+        // depth chain. D3D12 requires a typeless resource for the latter.
+        let (resource_format, clear_format) = match desc.format {
+            4 => (28, 28),  // R8G8B8A8_UNORM
+            5 => (29, 29),  // R8G8B8A8_UNORM_SRGB
+            6 => (87, 87),  // B8G8R8A8_UNORM
+            7 => (91, 91),  // B8G8R8A8_UNORM_SRGB
+            10 => (10, 10), // R16G16B16A16_FLOAT
+            11 => (55, 55), // D16_UNORM
+            12 => (44, 45), // R24G8_TYPELESS resource, D24_UNORM_S8_UINT view
+            13 => (40, 40), // D32_FLOAT
+            _ => (desc.format as u32, desc.format as u32),
+        };
         let resource_desc = D3d12ResourceDesc {
             dimension: 3, // D3D12_RESOURCE_DIMENSION_TEXTURE2D
             alignment: 0,
@@ -347,17 +512,15 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
             height: desc.height.max(1) as u32,
             depth_or_array_size: desc.array_size.max(1) as u16,
             mip_levels: desc.mip_levels.max(1) as u16,
-            format: desc.format as u32,
+            format: resource_format,
             sample_count: desc.sample_count.max(1) as u32,
             sample_quality: 0,
             layout: 0, // D3D12_TEXTURE_LAYOUT_UNKNOWN
-            flags: if desc.bind_flags & 0x40 != 0 {
-                0x2
-            } else if desc.bind_flags & 0x20 != 0 {
-                0x1
-            } else {
-                0
-            },
+            // Keep resources broadly usable until the LibOVR bind-flag to
+            // DXGI-format mapping is fully decoded. In particular, the
+            // incoming depth descriptor format is not yet a valid D3D12
+            // optimized-clear format under Wine vkd3d.
+            flags: 0,
         };
         let heap = D3d12HeapProperties {
             heap_type: 1,
@@ -369,6 +532,17 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         let device_vtable = unsafe { *(d3d12_device as *const *const *const core::ffi::c_void) };
         let create: CreateCommittedResource =
             unsafe { core::mem::transmute(*device_vtable.add(27)) };
+        let depth_clear = D3d12ClearValue {
+            format: clear_format,
+            depth: 1.0,
+            stencil: 0,
+            _padding: [0; 3],
+        };
+        let optimized_clear = if resource_desc.flags & 0x2 != 0 {
+            (&depth_clear as *const D3d12ClearValue).cast()
+        } else {
+            core::ptr::null()
+        };
         let mut textures = match SWAP_TEXTURES.lock() {
             Ok(textures) => textures,
             Err(_) => return -1000,
@@ -382,7 +556,7 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
                     0,
                     &resource_desc,
                     0,
-                    core::ptr::null(),
+                    optimized_clear,
                     &IID_ID3D12_RESOURCE,
                     &mut created,
                 )
@@ -398,8 +572,12 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         let release: Release = unsafe { core::mem::transmute(*device_vtable.add(2)) };
         unsafe { release(d3d12_device) };
         log_call(&format!(
-            "ovr_CreateTextureSwapChainDX D3D12 {}x{} format={}",
-            resource_desc.width, resource_desc.height, resource_desc.format
+            "ovr_CreateTextureSwapChainDX D3D12 {}x{} format={} bind={:#x} flags={:#x}",
+            resource_desc.width,
+            resource_desc.height,
+            resource_desc.format,
+            desc.bind_flags,
+            resource_desc.flags
         ));
         unsafe { *out_chain = (&SWAP_CHAIN_TOKEN as *const u8).cast_mut().cast() };
         return OVR_SUCCESS;
@@ -511,9 +689,7 @@ macro_rules! unresolved_exports {
 // Resolver-complete exports for this Echo executable. They are intentionally
 // inert until each signature/behavior is implemented and tested.
 unresolved_exports!(
-    ovr_BeginFrame,
     ovr_ClearShouldRecenterFlag,
-    ovr_CommitTextureSwapChain,
     ovr_CreateMirrorTextureDX,
     ovr_CreateMirrorTextureGL,
     ovr_CreateMirrorTextureWithOptionsDX,
@@ -524,7 +700,6 @@ unresolved_exports!(
     ovr_DestroyMirrorTexture,
     ovr_DestroyTextureSwapChain,
     ovr_EnableExtension,
-    ovr_EndFrame,
     ovr_GetAudioDeviceInGuid,
     ovr_GetAudioDeviceInGuidStr,
     ovr_GetAudioDeviceInWaveId,
@@ -543,26 +718,21 @@ unresolved_exports!(
     ovr_GetFloatArray,
     ovr_GetFovStencil,
     ovr_GetHmdColorDesc,
-    ovr_GetInputState,
     ovr_GetInstanceExtensionsVk,
     ovr_GetInt,
     ovr_GetMirrorTextureBufferDX,
     ovr_GetMirrorTextureBufferGL,
     ovr_GetMirrorTextureBufferVk,
     ovr_GetPerfStats,
-    ovr_GetPredictedDisplayTime,
     ovr_GetSessionPhysicalDeviceVk,
     ovr_GetString,
     ovr_GetTextureSwapChainBufferGL,
     ovr_GetTextureSwapChainBufferVk,
-    ovr_GetTextureSwapChainCurrentIndex,
     ovr_GetTextureSwapChainDesc,
     ovr_GetTouchHapticsDesc,
     ovr_GetTrackerCount,
     ovr_GetTrackerDesc,
-    ovr_GetTrackerPose,
     ovr_GetTrackingOriginType,
-    ovr_GetTrackingState,
     ovr_IdentifyClient,
     ovr_IsExtensionSupported,
     ovr_Lookup,
@@ -583,12 +753,10 @@ unresolved_exports!(
     ovr_SetSynchronizationQueueVk,
     ovr_SetTrackingOriginType,
     ovr_SpecifyTrackingOrigin,
-    ovr_SubmitControllerVibration,
     ovr_SubmitFrame2,
     ovr_TestBoundary,
     ovr_TestBoundaryPoint,
     ovr_TraceMessage,
-    ovr_WaitToBeginFrame,
 );
 
 #[cfg(test)]

@@ -19,10 +19,12 @@ pkgs.mkShell {
     pkgs.rustup
     pkgs.pkg-config
     pkgs.gnumake
+    pkgs.cmake
     pkgs.binutils
     pkgs.file
     pkgs.python3
     pkgs.monado
+    pkgs.openxr-loader
     pkgs.steam-run
     mingw
   ];
@@ -40,14 +42,20 @@ pkgs.mkShell {
     # Proton is deliberately not a Nix dependency: use the user's Steam-managed
     # build so the test prefix matches normal game execution.
     proton_root="$HOME/.local/share/Steam/steamapps/common"
-    for candidate in "$proton_root/Proton 11.0/proton" \
-                     "$proton_root/Proton - Experimental/proton" \
+    for candidate in "$proton_root/Proton - Experimental/proton" \
+                     "$proton_root/Proton 11.0/proton" \
                      "$proton_root/Proton 10.0/proton"; do
       if [ -x "$candidate" ]; then
         export LIBOVR_OPENXR_PROTON="$candidate"
         break
       fi
     done
+    # Wine's OpenXR registry/runtime installation is Proton-version specific.
+    # Keep the Experimental prefix independent from the earlier Proton 11
+    # experiments so neither runtime initialization contaminates the other.
+    if [[ "$LIBOVR_OPENXR_PROTON" == *"Proton - Experimental/proton" ]]; then
+      export LIBOVR_OPENXR_PREFIX="$PWD/artifacts/proton-experimental-prefix"
+    fi
 
     echo "libovr-openxr-rs development shell"
     echo "  host checks: cargo test"

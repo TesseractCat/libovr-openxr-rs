@@ -6,6 +6,10 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 const ECHO_LOADER_SIGNATURE_CHECK_RVA: usize = 0x0136_5bd0;
+// Echo's offline/provider path receives an unknown network-state record and
+// deliberately writes to address zero after reporting it. Continue past that
+// diagnostic-only assertion to expose subsequent required state/API behavior.
+const ECHO_UNKNOWN_GAME_STATE_ASSERT_RVA: usize = 0x0051_1ca8;
 // pnsovr compares the already-loaded Platform DLL path against the Oculus
 // runtime path and rejects the normal game-directory dependency as
 // `PreLoaded` before resolving its initialization exports.
@@ -74,6 +78,16 @@ pub unsafe extern "system" fn DllMain(
     let mut ignored = 0;
     let _ = VirtualProtect(target.cast(), 6, old_protect, &mut ignored);
     let _ = FlushInstructionCache(GetCurrentProcess(), target.cast(), 6);
+
+    let assert_target = (base as usize + ECHO_UNKNOWN_GAME_STATE_ASSERT_RVA) as *mut u8;
+    let mut assert_protect = 0;
+    if VirtualProtect(assert_target.cast(), 2, PAGE_EXECUTE_READWRITE, &mut assert_protect) != 0 {
+        // jmp over `mov dword ptr [0], 1` to the normal success return.
+        assert_target.copy_from_nonoverlapping([0xeb, 0x2c].as_ptr(), 2);
+        let mut ignored = 0;
+        let _ = VirtualProtect(assert_target.cast(), 2, assert_protect, &mut ignored);
+        let _ = FlushInstructionCache(GetCurrentProcess(), assert_target.cast(), 2);
+    }
 
     // pnsovr is loaded later by Echo. Patch only its in-memory local
     // PreLoaded rejection branch once it appears; game files stay untouched.
