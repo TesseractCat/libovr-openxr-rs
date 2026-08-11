@@ -30,7 +30,18 @@ pub struct D3d12Session {
     pub head_pose: openxr::Posef,
     pub hand_poses: [openxr::Posef; 2],
     pub input_action_set: openxr::ActionSet,
+    pub select_action: openxr::Action<bool>,
+    pub primary_action: openxr::Action<bool>,
+    pub trigger_action: openxr::Action<f32>,
+    pub squeeze_action: openxr::Action<f32>,
+    pub thumbstick_action: openxr::Action<openxr::Vector2f>,
     pub hand_spaces: [openxr::Space; 2],
+    pub hand_select: [bool; 2],
+    pub hand_primary: [bool; 2],
+    pub hand_trigger: [f32; 2],
+    pub hand_squeeze: [f32; 2],
+    pub hand_thumbstick: [openxr::Vector2f; 2],
+    pub last_logged_hand_poses: [openxr::Posef; 2],
     pub running: bool,
     pub frame_state: Option<openxr::FrameState>,
     pub frame_begun: bool,
@@ -153,6 +164,21 @@ pub unsafe fn create_d3d12_session(
     let hand_action = input_action_set
         .create_action::<openxr::Posef>("hand_pose", "Hand pose", &[left_path, right_path])
         .map_err(|error| error.to_string())?;
+    let select_action = input_action_set
+        .create_action::<bool>("select", "Select", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
+    let primary_action = input_action_set
+        .create_action::<bool>("primary", "Primary", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
+    let trigger_action = input_action_set
+        .create_action::<f32>("trigger", "Trigger", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
+    let squeeze_action = input_action_set
+        .create_action::<f32>("squeeze", "Squeeze", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
+    let thumbstick_action = input_action_set
+        .create_action::<openxr::Vector2f>("thumbstick", "Thumbstick", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
     instance
         .suggest_interaction_profile_bindings(
             instance
@@ -169,6 +195,87 @@ pub unsafe fn create_d3d12_session(
                     &hand_action,
                     instance
                         .string_to_path("/user/hand/right/input/grip/pose")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &select_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/select/click")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &select_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/select/click")
+                        .map_err(|error| error.to_string())?,
+                ),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    instance
+        .suggest_interaction_profile_bindings(
+            instance
+                .string_to_path("/interaction_profiles/oculus/touch_controller")
+                .map_err(|error| error.to_string())?,
+            &[
+                openxr::Binding::new(
+                    &hand_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/grip/pose")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &hand_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/grip/pose")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &primary_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/x/click")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &primary_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/a/click")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &trigger_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/trigger/value")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &trigger_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/trigger/value")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &squeeze_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/squeeze/value")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &squeeze_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/squeeze/value")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &thumbstick_action,
+                    instance
+                        .string_to_path("/user/hand/left/input/thumbstick")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &thumbstick_action,
+                    instance
+                        .string_to_path("/user/hand/right/input/thumbstick")
                         .map_err(|error| error.to_string())?,
                 ),
             ],
@@ -195,7 +302,18 @@ pub unsafe fn create_d3d12_session(
         head_pose: identity,
         hand_poses: [identity; 2],
         input_action_set,
+        select_action,
+        primary_action,
+        trigger_action,
+        squeeze_action,
+        thumbstick_action,
         hand_spaces,
+        hand_select: [false; 2],
+        hand_primary: [false; 2],
+        hand_trigger: [0.0; 2],
+        hand_squeeze: [0.0; 2],
+        hand_thumbstick: [openxr::Vector2f { x: 0.0, y: 0.0 }; 2],
+        last_logged_hand_poses: [identity; 2],
         running: false,
         frame_state: None,
         frame_begun: false,
@@ -285,6 +403,64 @@ impl D3d12Session {
             for (index, hand_space) in self.hand_spaces.iter().enumerate() {
                 if let Ok(location) = hand_space.locate(&self.space, display_time) {
                     self.hand_poses[index] = location.pose;
+                    let previous = self.last_logged_hand_poses[index];
+                    let pose = location.pose;
+                    let changed = (pose.position.x - previous.position.x).abs() > 0.002
+                        || (pose.position.y - previous.position.y).abs() > 0.002
+                        || (pose.position.z - previous.position.z).abs() > 0.002
+                        || (pose.orientation.x - previous.orientation.x).abs() > 0.002
+                        || (pose.orientation.y - previous.orientation.y).abs() > 0.002
+                        || (pose.orientation.z - previous.orientation.z).abs() > 0.002
+                        || (pose.orientation.w - previous.orientation.w).abs() > 0.002;
+                    if changed {
+                        crate::capi::log_call(&format!(
+                            "OpenXR {} grip flags={:?} pos=({:.3},{:.3},{:.3}) quat=({:.3},{:.3},{:.3},{:.3})",
+                            if index == 0 { "left" } else { "right" },
+                            location.location_flags,
+                            pose.position.x,
+                            pose.position.y,
+                            pose.position.z,
+                            pose.orientation.x,
+                            pose.orientation.y,
+                            pose.orientation.z,
+                            pose.orientation.w,
+                        ));
+                        self.last_logged_hand_poses[index] = pose;
+                    }
+                }
+                let hand_path = if index == 0 {
+                    self.instance.string_to_path("/user/hand/left")
+                } else {
+                    self.instance.string_to_path("/user/hand/right")
+                };
+                if let Ok(hand_path) = hand_path {
+                    if let Ok(state) = self.select_action.state(&self.session, hand_path) {
+                        self.hand_select[index] = state.is_active && state.current_state;
+                    }
+                    if let Ok(state) = self.primary_action.state(&self.session, hand_path) {
+                        self.hand_primary[index] = state.is_active && state.current_state;
+                    }
+                    if let Ok(state) = self.trigger_action.state(&self.session, hand_path) {
+                        self.hand_trigger[index] = if state.is_active {
+                            state.current_state
+                        } else {
+                            0.0
+                        };
+                    }
+                    if let Ok(state) = self.squeeze_action.state(&self.session, hand_path) {
+                        self.hand_squeeze[index] = if state.is_active {
+                            state.current_state
+                        } else {
+                            0.0
+                        };
+                    }
+                    if let Ok(state) = self.thumbstick_action.state(&self.session, hand_path) {
+                        self.hand_thumbstick[index] = if state.is_active {
+                            state.current_state
+                        } else {
+                            openxr::Vector2f { x: 0.0, y: 0.0 }
+                        };
+                    }
                 }
             }
             if let Some(swapchain) = self.color_swapchain.as_mut() {

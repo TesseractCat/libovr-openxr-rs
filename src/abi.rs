@@ -128,9 +128,10 @@ pub struct OvrPoseStatef {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OvrTrackingState {
     pub head_pose: OvrPoseStatef,
-    pub hand_poses: [OvrPosef; 2],
-    pub calibrated_origin: OvrPosef,
     pub status_flags: u32,
+    pub hand_poses: [OvrPoseStatef; 2],
+    pub hand_status_flags: [u32; 2],
+    pub calibrated_origin: OvrPosef,
 }
 
 #[repr(C)]

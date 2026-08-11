@@ -6,7 +6,7 @@
 use core::ffi::c_char;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::abi::{
@@ -18,6 +18,7 @@ use crate::abi::{
 };
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static TRACKING_ORIGIN: AtomicI32 = AtomicI32::new(1);
 #[cfg(windows)]
 static XR_ADAPTER_LUID: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
 static SESSION_TOKEN: u8 = 1;
@@ -305,19 +306,24 @@ pub extern "system" fn ovr_GetTrackingState(
                     time_in_seconds: absolute_time,
                     ..Default::default()
                 },
-                hand_poses: session.hand_poses.map(|hand| crate::abi::OvrPosef {
-                    orientation: crate::abi::OvrQuatf {
-                        x: hand.orientation.x,
-                        y: hand.orientation.y,
-                        z: hand.orientation.z,
-                        w: hand.orientation.w,
+                hand_poses: session.hand_poses.map(|hand| crate::abi::OvrPoseStatef {
+                    pose: crate::abi::OvrPosef {
+                        orientation: crate::abi::OvrQuatf {
+                            x: hand.orientation.x,
+                            y: hand.orientation.y,
+                            z: hand.orientation.z,
+                            w: hand.orientation.w,
+                        },
+                        position: OvrVector3f {
+                            x: hand.position.x,
+                            y: hand.position.y,
+                            z: hand.position.z,
+                        },
                     },
-                    position: OvrVector3f {
-                        x: hand.position.x,
-                        y: hand.position.y,
-                        z: hand.position.z,
-                    },
+                    time_in_seconds: absolute_time,
+                    ..Default::default()
                 }),
+                hand_status_flags: [0x3; 2],
                 calibrated_origin: crate::abi::OvrPosef {
                     orientation: crate::abi::OvrQuatf {
                         w: 1.0,
@@ -369,12 +375,38 @@ pub extern "system" fn ovr_GetInputState(
     if input_state.is_null() {
         return -1005;
     }
-    unsafe {
-        *input_state = OvrInputState {
-            controller_type,
-            ..Default::default()
-        };
+    #[allow(unused_mut)]
+    let mut state = OvrInputState {
+        controller_type,
+        ..Default::default()
+    };
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            for hand in 0..2 {
+                let selected = session.hand_select[hand] || session.hand_primary[hand];
+                if selected {
+                    // LibOVR Touch maps the primary left/right buttons to X/A.
+                    state.buttons |= if hand == 0 { 0x0000_0100 } else { 0x0000_0001 };
+                }
+                let trigger = session.hand_trigger[hand].max(if session.hand_select[hand] {
+                    1.0
+                } else {
+                    0.0
+                });
+                state.index_trigger[hand] = trigger;
+                state.index_trigger_no_deadzone[hand] = trigger;
+                state.hand_trigger[hand] = session.hand_squeeze[hand];
+                state.hand_trigger_no_deadzone[hand] = session.hand_squeeze[hand];
+                state.thumbstick[hand] = OvrVector2f {
+                    x: session.hand_thumbstick[hand].x,
+                    y: session.hand_thumbstick[hand].y,
+                };
+                state.thumbstick_no_deadzone[hand] = state.thumbstick[hand];
+            }
+        }
     }
+    unsafe { *input_state = state };
     OVR_SUCCESS
 }
 
@@ -414,27 +446,29 @@ pub unsafe extern "system" fn ovr_GetDevicePoses(
     let tracking = ovr_GetTrackingState(_session, absolute_time, 0);
     for index in 0..device_count as usize {
         let device_type = unsafe { *device_types.add(index) };
-        // ovrTrackedDevice_HMD is 0. Controllers receive neutral poses until
-        // OpenXR action-space bindings are wired up.
+        // ovrTrackedDeviceType is a bitmask: HMD=1, LTouch=2, RTouch=4.
         unsafe {
             *out_device_poses.add(index) = match device_type {
-                0 => tracking.head_pose,
-                1 => crate::abi::OvrPoseStatef {
-                    pose: tracking.hand_poses[0],
-                    time_in_seconds: absolute_time,
-                    ..Default::default()
-                },
-                2 => crate::abi::OvrPoseStatef {
-                    pose: tracking.hand_poses[1],
-                    time_in_seconds: absolute_time,
-                    ..Default::default()
-                },
+                0x0001 => tracking.head_pose,
+                0x0002 => tracking.hand_poses[0],
+                0x0004 => tracking.hand_poses[1],
                 _ => crate::abi::OvrPoseStatef {
                     pose: tracking.head_pose.pose,
                     time_in_seconds: absolute_time,
                     ..Default::default()
                 },
             };
+            let pose = (*out_device_poses.add(index)).pose;
+            log_call(&format!(
+                "ovr_GetDevicePoses type={device_type:#x} pos=({:.3},{:.3},{:.3}) quat=({:.3},{:.3},{:.3},{:.3})",
+                pose.position.x,
+                pose.position.y,
+                pose.position.z,
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ));
         }
     }
     if !out_tracking_state.is_null() {
@@ -689,7 +723,25 @@ pub extern "system" fn ovr_GetConnectedControllerTypes(_session: OvrSession) -> 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetTrackingOriginType(_session: OvrSession) -> i32 {
     log_call("ovr_GetTrackingOriginType");
-    1 // ovrTrackingOrigin_FloorLevel
+    TRACKING_ORIGIN.load(Ordering::Acquire)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_SetTrackingOriginType(_session: OvrSession, origin: i32) -> OvrResult {
+    log_call(&format!("ovr_SetTrackingOriginType origin={origin}"));
+    if !(0..=1).contains(&origin) {
+        return -1005;
+    }
+    TRACKING_ORIGIN.store(origin, Ordering::Release);
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_RecenterTrackingOrigin(_session: OvrSession) -> OvrResult {
+    log_call("ovr_RecenterTrackingOrigin");
+    // Qwerty's LOCAL space is already floor-relative. Capture/compose a
+    // recenter transform once Echo requests one in the next tracking pass.
+    OVR_SUCCESS
 }
 
 /// `ovr_GetPerfStats` returns an `ovrResult`; it was previously emitted as a
@@ -1186,7 +1238,6 @@ unresolved_exports!(
     ovr_IdentifyClient,
     ovr_IsExtensionSupported,
     ovr_Lookup,
-    ovr_RecenterTrackingOrigin,
     ovr_ReportClientInfo,
     ovr_RequestBoundaryVisible,
     ovr_ResetBoundaryLookAndFeel,
@@ -1200,7 +1251,6 @@ unresolved_exports!(
     ovr_SetInt,
     ovr_SetString,
     ovr_SetSynchronizationQueueVk,
-    ovr_SetTrackingOriginType,
     ovr_SpecifyTrackingOrigin,
     ovr_SubmitFrame2,
     ovr_TestBoundary,
