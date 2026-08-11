@@ -21,6 +21,16 @@ export XRT_COMPOSITOR_NULL=1
 export XR_RUNTIME_JSON="$(dirname "$(command -v monado-service)")/../share/openxr/1/openxr_monado.json"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
 
+env_file="$state_root/env.sh"
+cat >"$env_file" <<EOF
+export XDG_CONFIG_HOME='$XDG_CONFIG_HOME'
+export XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR'
+export XRT_SIMULATE_HMD=1
+export XRT_COMPOSITOR_NULL=1
+export XR_RUNTIME_JSON='$XR_RUNTIME_JSON'
+export LIBOVR_OPENXR_PROBE=1
+EOF
+
 log="$state_root/monado-service.log"
 monado-service >"$log" 2>&1 &
 pid=$!
@@ -33,6 +43,6 @@ XDG_CONFIG_HOME=$XDG_CONFIG_HOME
 XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
 log=$log
 
-For the Windows shim probe, export LIBOVR_OPENXR_PROBE=1 before run-game.sh.
+Source this before run-game.sh: source $env_file
 Stop it with: kill $pid
 EOF
