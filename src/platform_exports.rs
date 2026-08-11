@@ -224,10 +224,20 @@ pub extern "system" fn ovr_FreeMessage() {
     crate::capi::log_call("ovr_FreeMessage");
 }
 
+/// pnsovr resolves this at runtime rather than through its PE import table.
+/// A null message denotes an empty offline Platform SDK queue.
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_PopMessage() -> *mut core::ffi::c_void {
+    crate::capi::log_call("ovr_PopMessage");
+    core::ptr::null_mut()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetLoggedInUserID() -> u64 {
     crate::capi::log_call("ovr_GetLoggedInUserID");
-    0 // no Oculus account is available in the offline shim
+    // Echo's offline path still requires a non-zero local principal. Zero
+    // produces its "???-0" player records and later a null indirect call.
+    1
 }
 
 #[unsafe(no_mangle)]
@@ -300,8 +310,11 @@ pub extern "system" fn ovr_Voip_GetPCM() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Voip_GetOutputBufferMaxSize() {
+pub extern "system" fn ovr_Voip_GetOutputBufferMaxSize() -> usize {
     crate::capi::log_call("ovr_Voip_GetOutputBufferMaxSize");
+    // Platform SDK declares this as size_t. A void stub leaves RAX undefined,
+    // which makes pnsovr treat an arbitrary value as an audio-buffer size.
+    0
 }
 
 #[unsafe(no_mangle)]

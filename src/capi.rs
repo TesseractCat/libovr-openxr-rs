@@ -145,8 +145,8 @@ pub extern "system" fn ovr_Initialize(_params: *const OvrInitParams) -> OvrResul
         ));
         match crate::openxr_backend::probe() {
             Ok(capabilities) => log_call(&format!(
-                "openxr probe d3d11={} mnd_headless={}",
-                capabilities.d3d11, capabilities.monado_headless
+                "openxr probe d3d11={} d3d12={} mnd_headless={}",
+                capabilities.d3d11, capabilities.d3d12, capabilities.monado_headless
             )),
             Err(error) => log_call(&format!("openxr probe failed: {error}")),
         }
@@ -483,6 +483,13 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         let get_device: GetDevice = unsafe { core::mem::transmute(*queue_vtable.add(7)) };
         let mut d3d12_device = core::ptr::null_mut();
         let device_result = unsafe { get_device(queue, &IID_ID3D12_DEVICE, &mut d3d12_device) };
+        if std::env::var_os("LIBOVR_OPENXR_D3D12_PROBE").is_some() {
+            #[cfg(windows)]
+            match unsafe { crate::openxr_backend::probe_d3d12_session(d3d12_device, queue) } {
+                Ok(()) => log_call("openxr D3D12 session probe ok"),
+                Err(error) => log_call(&format!("openxr D3D12 session probe failed: {error}")),
+            }
+        }
         let release: Release = unsafe { core::mem::transmute(*queue_vtable.add(2)) };
         unsafe { release(queue) };
         if device_result < 0 {

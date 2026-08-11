@@ -25,6 +25,8 @@ pkgs.mkShell {
     pkgs.python3
     pkgs.monado
     pkgs.openxr-loader
+    # OpenVR-to-OpenXR bridge used by Proton to expose WineOpenXR.
+    pkgs.xrizer
     pkgs.steam-run
     mingw
   ];
@@ -60,7 +62,10 @@ pkgs.mkShell {
     echo "libovr-openxr-rs development shell"
     echo "  host checks: cargo test"
     echo "  Windows DLL: tools/build-windows.sh"
+    export LIBOVR_OPENXR_XRIZER="${pkgs.xrizer}/lib/xrizer"
+
     echo "  Proton run: steam-run \"$LIBOVR_OPENXR_PROTON\" run <exe>"
+    echo "  xrizer OpenVR override: $LIBOVR_OPENXR_XRIZER"
     if [ -n "''${LIBOVR_OPENXR_PROTON:-}" ]; then
       echo "  Proton: $LIBOVR_OPENXR_PROTON"
     else

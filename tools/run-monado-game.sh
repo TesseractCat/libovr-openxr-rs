@@ -8,7 +8,6 @@ project_root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck disable=SC1091
 source "$project_root/artifacts/monado-null/env.sh"
 
-# The disposable Proton prefix is more reliable without fsync during repeated
-# injector/debug launches. run-game.sh builds and deploys the current DLLs.
-export WINEFSYNC="${WINEFSYNC:-0}"
+# run-game.sh applies the shared Proton/xrizer launch environment after this
+# wrapper selects the disposable Monado runtime.
 exec "$project_root/tools/run-game.sh" "$@"

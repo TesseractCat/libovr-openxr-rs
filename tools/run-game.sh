@@ -48,8 +48,9 @@ export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-${LIBOVR_OPENXR_PREFIX:
 export STEAM_COMPAT_APP_ID="${STEAM_COMPAT_APP_ID:-0}"
 export SteamAppId="${SteamAppId:-$STEAM_COMPAT_APP_ID}"
 export SteamGameId="${SteamGameId:-$STEAM_COMPAT_APP_ID}"
-# Disable fsync by default for this disposable prefix: repeated reg.exe and
-# launcher invocations otherwise race Proton's stale shared-memory cleanup.
+# Disable fsync by default for this disposable prefix. Proton honors
+# PROTON_NO_FSYNC; retain WINEFSYNC for Wine components that read it directly.
+export PROTON_NO_FSYNC="${PROTON_NO_FSYNC:-1}"
 export WINEFSYNC="${WINEFSYNC:-0}"
 # Proton's reg.exe intermittently returns 1 after committing changes while
 # tearing down fsync shared memory; continue so all values are attempted.
@@ -57,8 +58,16 @@ proton_reg_add() {
   steam-run "$LIBOVR_OPENXR_PROTON" run reg.exe add "$@" >/dev/null || \
     printf 'warning: Proton reg.exe returned non-zero after add\n' >&2
 }
-proton_reg_add 'HKLM\Software\Oculus VR, LLC\Oculus' /v Base /t REG_SZ \
-  /d 'C:\Program Files\Oculus' /f
+if [[ "${LIBOVR_OPENXR_SKIP_REGISTRY:-0}" != 1 ]]; then
+  proton_reg_add 'HKLM\Software\Oculus VR, LLC\Oculus' /v Base /t REG_SZ \
+    /d 'C:\Program Files\Oculus' /f
+fi
+# Proton uses its OpenVR availability check to enable WineOpenXR. xrizer
+# satisfies that check and forwards it to the active native OpenXR runtime.
+if [[ -n "${LIBOVR_OPENXR_XRIZER:-}" ]]; then
+  export VR_OVERRIDE="${VR_OVERRIDE:-$LIBOVR_OPENXR_XRIZER}"
+fi
+export PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES="${PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES:-1}"
 # Start Echo suspended and inject this helper before its entry point. This is
 # deterministic under Proton and avoids AppInit_DLLs' global, unreliable hook.
 game_exe_windows="Z:${game_exe//\//\\}"

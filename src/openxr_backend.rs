@@ -10,11 +10,54 @@ use openxr::{ApplicationInfo, Entry, ExtensionSet};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenXrCapabilities {
     pub d3d11: bool,
+    pub d3d12: bool,
     pub monado_headless: bool,
 }
 
 /// Errors are strings because loader/runtime failures are operational details
 /// intended for the shim trace, not CAPI result codes.
+/// Create and immediately destroy a D3D12 OpenXR session. This is deliberately
+/// diagnostic-only while the CAPI owns Echo's swapchains; it verifies that the
+/// exact D3D12 device/queue passed by Echo are acceptable to the active runtime.
+#[cfg(windows)]
+pub unsafe fn probe_d3d12_session(
+    device: *mut core::ffi::c_void,
+    queue: *mut core::ffi::c_void,
+) -> Result<(), String> {
+    let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
+    let extensions = entry
+        .enumerate_extensions()
+        .map_err(|error| error.to_string())?;
+    if !extensions.khr_d3d12_enable {
+        return Err("XR_KHR_d3d12_enable unavailable".into());
+    }
+    let mut requested = ExtensionSet::default();
+    requested.khr_d3d12_enable = true;
+    let instance = entry
+        .create_instance(
+            &ApplicationInfo {
+                application_name: "libovr-openxr",
+                application_version: 1,
+                engine_name: "Echo VR",
+                engine_version: 1,
+                api_version: openxr::Version::new(1, 0, 0),
+            },
+            &requested,
+            &[],
+        )
+        .map_err(|error| error.to_string())?;
+    let system = instance
+        .system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)
+        .map_err(|error| error.to_string())?;
+    let info = openxr::d3d::SessionCreateInfoD3D12 {
+        device: device.cast(),
+        queue: queue.cast(),
+    };
+    let _session = unsafe { instance.create_session::<openxr::D3D12>(system, &info) }
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub fn probe() -> Result<OpenXrCapabilities, String> {
     // `Entry::load` dynamically locates the platform OpenXR loader. This is
     // essential for Wine: no OpenXR import library is baked into our DLL.
@@ -29,11 +72,16 @@ pub fn probe() -> Result<OpenXrCapabilities, String> {
     #[cfg(windows)]
     {
         requested.khr_d3d11_enable = extensions.khr_d3d11_enable;
+        requested.khr_d3d12_enable = extensions.khr_d3d12_enable;
     }
     #[cfg(windows)]
     let d3d11 = extensions.khr_d3d11_enable;
+    #[cfg(windows)]
+    let d3d12 = extensions.khr_d3d12_enable;
     #[cfg(not(windows))]
     let d3d11 = false;
+    #[cfg(not(windows))]
+    let d3d12 = false;
     let _instance = entry
         .create_instance(
             &ApplicationInfo {
@@ -50,6 +98,7 @@ pub fn probe() -> Result<OpenXrCapabilities, String> {
 
     Ok(OpenXrCapabilities {
         d3d11,
+        d3d12,
         monado_headless: extensions.mnd_headless,
     })
 }
