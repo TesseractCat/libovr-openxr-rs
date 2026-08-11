@@ -11,14 +11,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::abi::{
     OVR_AUDIO_MAX_DEVICE_STR_SIZE, OVR_EYE_LEFT, OVR_SUCCESS, OvrErrorInfo, OvrEyeRenderDesc,
-    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrInputState, OvrResult,
-    OvrSession, OvrSessionStatus, OvrSizei, OvrTextureSwapChain, OvrTextureSwapChainDesc,
-    OvrTrackerPose, OvrTrackingState, OvrVector2f, OvrVector3f, OvrVersionString,
+    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrInputState,
+    OvrLayerEyeFov, OvrLayerHeader, OvrResult, OvrSession, OvrSessionStatus, OvrSizei,
+    OvrTextureSwapChain, OvrTextureSwapChainDesc, OvrTrackerDesc, OvrTrackerPose, OvrTrackingState,
+    OvrVector2f, OvrVector3f, OvrVersionString,
 };
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static XR_ADAPTER_LUID: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
 static SESSION_TOKEN: u8 = 1;
-static SWAP_CHAIN_TOKEN: u8 = 2;
 static VERSION: &[u8] = b"LibOVR OpenXR shim (bootstrap)\0";
 
 #[repr(C)]
@@ -124,7 +126,76 @@ const IID_ID3D12_RESOURCE: Guid = Guid {
     data4: [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad],
 };
 
-static SWAP_TEXTURES: std::sync::Mutex<[usize; 3]> = std::sync::Mutex::new([0; 3]);
+/// LibOVR swapchain state. Echo creates separate color and depth chains; each
+/// needs stable opaque identity and independently-owned D3D resources.
+#[derive(Debug)]
+struct SwapChainState {
+    textures: [usize; 3],
+    current_index: i32,
+    /// OpenXR chooses this chain's image through xrAcquireSwapchainImage.
+    openxr_color: bool,
+}
+
+static SWAP_CHAINS: std::sync::Mutex<Vec<Box<SwapChainState>>> = std::sync::Mutex::new(Vec::new());
+
+// OpenXR session lifetime is process-wide, matching LibOVR's singleton HMD
+// session. The frame bridge will use this retained session rather than the old
+// create-and-destroy diagnostic probe.
+#[cfg(windows)]
+static XR_D3D12_SESSION: std::sync::Mutex<Option<crate::openxr_backend::D3d12Session>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+unsafe fn ensure_d3d12_session(
+    device: *mut core::ffi::c_void,
+    queue: *mut core::ffi::c_void,
+) -> Result<(), String> {
+    let mut slot = XR_D3D12_SESSION
+        .lock()
+        .map_err(|_| "OpenXR session lock poisoned".to_owned())?;
+    if slot.is_none() {
+        *slot = Some(unsafe { crate::openxr_backend::create_d3d12_session(device, queue) }?);
+    }
+    Ok(())
+}
+
+fn register_swap_chain(
+    textures: [usize; 3],
+    openxr_color: bool,
+) -> Result<OvrTextureSwapChain, OvrResult> {
+    let mut chains = SWAP_CHAINS.lock().map_err(|_| -1000)?;
+    let chain = Box::new(SwapChainState {
+        textures,
+        current_index: 0,
+        openxr_color,
+    });
+    let handle = (&*chain as *const SwapChainState).cast_mut().cast();
+    chains.push(chain);
+    Ok(handle)
+}
+
+fn swap_chain_state_mut(
+    chains: &mut [Box<SwapChainState>],
+    chain: OvrTextureSwapChain,
+) -> Result<&mut SwapChainState, OvrResult> {
+    chains
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(&***candidate, chain.cast()))
+        .map(|candidate| &mut **candidate)
+        .ok_or(-1005)
+}
+
+fn swap_chain_texture(chain: OvrTextureSwapChain, index: i32) -> Result<usize, OvrResult> {
+    if !(0..3).contains(&index) {
+        return Err(-1005);
+    }
+    let chains = SWAP_CHAINS.lock().map_err(|_| -1000)?;
+    chains
+        .iter()
+        .find(|candidate| std::ptr::eq(&***candidate, chain.cast()))
+        .map(|candidate| candidate.textures[index as usize])
+        .ok_or(-1005)
+}
 
 pub(crate) fn log_call(name: &str) {
     let temp = std::env::var_os("TEMP").unwrap_or_else(|| "C:\\windows\\temp".into());
@@ -137,6 +208,16 @@ pub(crate) fn log_call(name: &str) {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Initialize(_params: *const OvrInitParams) -> OvrResult {
     log_call("ovr_Initialize");
+    #[cfg(windows)]
+    match crate::openxr_backend::d3d12_adapter_luid() {
+        Ok(luid) => {
+            if let Ok(mut cached) = XR_ADAPTER_LUID.lock() {
+                *cached = Some(luid);
+            }
+            log_call("openxr D3D12 adapter LUID discovered");
+        }
+        Err(error) => log_call(&format!("openxr D3D12 adapter LUID unavailable: {error}")),
+    }
     if std::env::var_os("LIBOVR_OPENXR_PROBE").is_some() {
         log_call(&format!(
             "openxr env XR_RUNTIME_JSON={:?} XDG_RUNTIME_DIR={:?}",
@@ -176,7 +257,19 @@ pub unsafe extern "system" fn ovr_Create(
     unsafe {
         *session = (&SESSION_TOKEN as *const u8).cast_mut().cast();
         if !luid.is_null() {
-            *luid = OvrGraphicsLuid::default();
+            #[cfg(windows)]
+            {
+                *luid = XR_ADAPTER_LUID
+                    .lock()
+                    .ok()
+                    .and_then(|cached| *cached)
+                    .map(|reserved| OvrGraphicsLuid { reserved })
+                    .unwrap_or_default();
+            }
+            #[cfg(not(windows))]
+            {
+                *luid = OvrGraphicsLuid::default();
+            }
         }
     }
     OVR_SUCCESS
@@ -189,6 +282,54 @@ pub extern "system" fn ovr_GetTrackingState(
     _latency_marker: u8,
 ) -> OvrTrackingState {
     log_call("ovr_GetTrackingState");
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            let pose = session.head_pose;
+            let head_pose = crate::abi::OvrPosef {
+                orientation: crate::abi::OvrQuatf {
+                    x: pose.orientation.x,
+                    y: pose.orientation.y,
+                    z: pose.orientation.z,
+                    w: pose.orientation.w,
+                },
+                position: OvrVector3f {
+                    x: pose.position.x,
+                    y: pose.position.y,
+                    z: pose.position.z,
+                },
+            };
+            return OvrTrackingState {
+                head_pose: crate::abi::OvrPoseStatef {
+                    pose: head_pose,
+                    time_in_seconds: absolute_time,
+                    ..Default::default()
+                },
+                hand_poses: session.hand_poses.map(|hand| crate::abi::OvrPosef {
+                    orientation: crate::abi::OvrQuatf {
+                        x: hand.orientation.x,
+                        y: hand.orientation.y,
+                        z: hand.orientation.z,
+                        w: hand.orientation.w,
+                    },
+                    position: OvrVector3f {
+                        x: hand.position.x,
+                        y: hand.position.y,
+                        z: hand.position.z,
+                    },
+                }),
+                calibrated_origin: crate::abi::OvrPosef {
+                    orientation: crate::abi::OvrQuatf {
+                        w: 1.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                status_flags: 0xe3,
+                ..Default::default()
+            };
+        }
+    }
     OvrTrackingState {
         head_pose: crate::abi::OvrPoseStatef {
             pose: crate::abi::OvrPosef {
@@ -208,8 +349,12 @@ pub extern "system" fn ovr_GetTrackingState(
             },
             ..Default::default()
         },
-        // ovrStatus_OrientationTracked | ovrStatus_PositionTracked.
-        status_flags: 0x3,
+        // Report both tracking and connection: Echo treats a tracked-but-not-
+        // connected HMD as a sensor/device failure.
+        // ovrStatus_OrientationTracked | ovrStatus_PositionTracked |
+        // ovrStatus_OrientationConnected | ovrStatus_PositionConnected |
+        // ovrStatus_HmdConnected.
+        status_flags: 0xe3,
         ..Default::default()
     }
 }
@@ -234,27 +379,129 @@ pub extern "system" fn ovr_GetInputState(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTrackerDesc(
+    _session: OvrSession,
+    _tracker_desc_index: u32,
+) -> OvrTrackerDesc {
+    log_call("ovr_GetTrackerDesc");
+    // CV1 constellation-camera envelope; Echo uses this to classify the
+    // synthetic trackers as room-scale cameras rather than unknown devices.
+    OvrTrackerDesc {
+        frustum_hfov_in_radians: 1.75,
+        frustum_vfov_in_radians: 1.40,
+        frustum_near_z_in_meters: 0.4,
+        frustum_far_z_in_meters: 2.5,
+    }
+}
+
+/// # Safety
+/// All output arrays must hold `device_count` entries when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetDevicePoses(
+    _session: OvrSession,
+    device_types: *const i32,
+    device_count: i32,
+    absolute_time: f64,
+    out_device_poses: *mut crate::abi::OvrPoseStatef,
+    out_tracking_state: *mut OvrTrackingState,
+) -> OvrResult {
+    log_call("ovr_GetDevicePoses");
+    if device_count < 0
+        || (device_count > 0 && (device_types.is_null() || out_device_poses.is_null()))
+    {
+        return -1005;
+    }
+    let tracking = ovr_GetTrackingState(_session, absolute_time, 0);
+    for index in 0..device_count as usize {
+        let device_type = unsafe { *device_types.add(index) };
+        // ovrTrackedDevice_HMD is 0. Controllers receive neutral poses until
+        // OpenXR action-space bindings are wired up.
+        unsafe {
+            *out_device_poses.add(index) = match device_type {
+                0 => tracking.head_pose,
+                1 => crate::abi::OvrPoseStatef {
+                    pose: tracking.hand_poses[0],
+                    time_in_seconds: absolute_time,
+                    ..Default::default()
+                },
+                2 => crate::abi::OvrPoseStatef {
+                    pose: tracking.hand_poses[1],
+                    time_in_seconds: absolute_time,
+                    ..Default::default()
+                },
+                _ => crate::abi::OvrPoseStatef {
+                    pose: tracking.head_pose.pose,
+                    time_in_seconds: absolute_time,
+                    ..Default::default()
+                },
+            };
+        }
+    }
+    if !out_tracking_state.is_null() {
+        unsafe { *out_tracking_state = tracking };
+    }
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetTrackerPose(
     _session: OvrSession,
-    _tracker_pose_index: u32,
+    tracker_pose_index: u32,
 ) -> OvrTrackerPose {
     log_call("ovr_GetTrackerPose");
+    // Do not collapse the three reported CV1 cameras onto the origin: Echo's
+    // hardware screen de-duplicates coincident trackers and showed one red
+    // sensor as a result. These are room-scale camera locations in LibOVR's
+    // local coordinate system.
+    let (position, orientation) = match tracker_pose_index {
+        // Facing -Z toward the player at the local origin.
+        0 => (
+            OvrVector3f {
+                x: 0.0,
+                y: 1.8,
+                z: 1.5,
+            },
+            crate::abi::OvrQuatf {
+                w: 1.0,
+                ..Default::default()
+            },
+        ),
+        // Side cameras are yawed inward, so their optical axes intersect the
+        // HMD rather than pointing parallel to the front camera.
+        1 => (
+            OvrVector3f {
+                x: -1.5,
+                y: 1.8,
+                z: 0.3,
+            },
+            crate::abi::OvrQuatf {
+                y: -0.634,
+                w: 0.773,
+                ..Default::default()
+            },
+        ),
+        _ => (
+            OvrVector3f {
+                x: 1.5,
+                y: 1.8,
+                z: 0.3,
+            },
+            crate::abi::OvrQuatf {
+                y: 0.634,
+                w: 0.773,
+                ..Default::default()
+            },
+        ),
+    };
+    let pose = crate::abi::OvrPosef {
+        orientation,
+        position,
+    };
     OvrTrackerPose {
-        pose: crate::abi::OvrPosef {
-            orientation: crate::abi::OvrQuatf {
-                w: 1.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        leveled_pose: crate::abi::OvrPosef {
-            orientation: crate::abi::OvrQuatf {
-                w: 1.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        status_flags: 0x3,
+        pose,
+        leveled_pose: pose,
+        // ovrTracker_Connected | ovrTracker_PoseTracked.
+        status_flags: 0x24,
     }
 }
 
@@ -276,9 +523,18 @@ pub extern "system" fn ovr_GetTextureSwapChainCurrentIndex(
     if index.is_null() {
         return -1005;
     }
-    unsafe {
-        *index = 0;
-    }
+    let chains = match SWAP_CHAINS.lock() {
+        Ok(chains) => chains,
+        Err(_) => return -1000,
+    };
+    let current = match chains
+        .iter()
+        .find(|candidate| std::ptr::eq(&***candidate, _chain.cast()))
+    {
+        Some(chain) => chain.current_index,
+        None => return -1005,
+    };
+    unsafe { *index = current };
     OVR_SUCCESS
 }
 
@@ -288,30 +544,115 @@ pub extern "system" fn ovr_CommitTextureSwapChain(
     _chain: OvrTextureSwapChain,
 ) -> OvrResult {
     log_call("ovr_CommitTextureSwapChain");
+    let mut chains = match SWAP_CHAINS.lock() {
+        Ok(chains) => chains,
+        Err(_) => return -1000,
+    };
+    let chain = match swap_chain_state_mut(&mut chains, _chain) {
+        Ok(chain) => chain,
+        Err(error) => return error,
+    };
+    // OpenXR selects the color image in ovr_WaitToBeginFrame. Advancing that
+    // index here would make Echo render into a different image than the one
+    // released to the compositor. The local depth chain still cycles here.
+    if !chain.openxr_color {
+        chain.current_index = (chain.current_index + 1) % chain.textures.len() as i32;
+    }
     OVR_SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_WaitToBeginFrame(_session: OvrSession, _frame_index: i64) -> OvrResult {
     log_call("ovr_WaitToBeginFrame");
+    #[cfg(windows)]
+    {
+        let mut acquired_index = None;
+        if let Ok(mut slot) = XR_D3D12_SESSION.lock() {
+            if let Some(session) = slot.as_mut() {
+                if let Err(error) = session.poll_events().and_then(|()| session.wait_frame()) {
+                    log_call(&format!("openxr wait frame failed: {error}"));
+                }
+                acquired_index = session.color_image.map(|index| index as i32);
+            }
+        }
+        // Echo queries both its color and depth chains after this call. Its
+        // chains have identical image counts, so keep their indices aligned.
+        if let Some(index) = acquired_index {
+            if let Ok(mut chains) = SWAP_CHAINS.lock() {
+                for chain in chains.iter_mut() {
+                    chain.current_index = index;
+                }
+            }
+        }
+    }
     OVR_SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_BeginFrame(_session: OvrSession, _frame_index: i64) -> OvrResult {
     log_call("ovr_BeginFrame");
+    #[cfg(windows)]
+    if let Ok(mut slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_mut() {
+            if let Err(error) = session.begin_frame() {
+                log_call(&format!("openxr begin frame failed: {error}"));
+            }
+        }
+    }
     OVR_SUCCESS
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_EndFrame(
+pub unsafe extern "system" fn ovr_EndFrame(
     _session: OvrSession,
     _frame_index: i64,
     _view_scale_desc: *const core::ffi::c_void,
-    _layer_ptr_list: *const *const core::ffi::c_void,
-    _layer_count: u32,
+    layer_ptr_list: *const *const core::ffi::c_void,
+    layer_count: u32,
 ) -> OvrResult {
     log_call("ovr_EndFrame");
+    // Record the real stereo submission topology before replacing the virtual
+    // swapchain with OpenXR-owned D3D12 images. Echo supplies LibOVR-owned,
+    // valid pointers for the duration of this call.
+    if !layer_ptr_list.is_null() && layer_count != 0 {
+        let layer = unsafe { *layer_ptr_list };
+        if !layer.is_null() {
+            let header = unsafe { &*layer.cast::<OvrLayerHeader>() };
+            log_call(&format!(
+                "ovr_EndFrame layer_type={} flags={:#x} count={layer_count}",
+                header.layer_type, header.flags
+            ));
+            // `ovrLayerEyeFov` (1) and `ovrLayerEyeFovDepth` (2) share this
+            // color-layer prefix; Echo currently submits the latter.
+            if matches!(header.layer_type, 1 | 2) {
+                let eye_fov = unsafe { &*layer.cast::<OvrLayerEyeFov>() };
+                log_call(&format!(
+                    "ovr_EndFrame EyeFov{} chains=({:p},{:p}) left={}x{}+{},{} right={}x{}+{},{}",
+                    if header.layer_type == 2 { "Depth" } else { "" },
+                    eye_fov.color_texture[0],
+                    eye_fov.color_texture[1],
+                    eye_fov.viewport[0].size.w,
+                    eye_fov.viewport[0].size.h,
+                    eye_fov.viewport[0].pos.x,
+                    eye_fov.viewport[0].pos.y,
+                    eye_fov.viewport[1].size.w,
+                    eye_fov.viewport[1].size.h,
+                    eye_fov.viewport[1].pos.x,
+                    eye_fov.viewport[1].pos.y,
+                ));
+            } else {
+                log_call("ovr_EndFrame unsupported layer type");
+            }
+        }
+    }
+    #[cfg(windows)]
+    if let Ok(mut slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_mut() {
+            if let Err(error) = session.end_frame_without_layers() {
+                log_call(&format!("openxr end frame failed: {error}"));
+            }
+        }
+    }
     OVR_SUCCESS
 }
 
@@ -323,6 +664,60 @@ pub extern "system" fn ovr_SubmitControllerVibration(
 ) -> OvrResult {
     log_call("ovr_SubmitControllerVibration");
     OVR_SUCCESS
+}
+
+/// Echo uses this before creating its world renderer. The unresolved export
+/// previously had a `void` ABI, so the game observed an arbitrary register
+/// value and could reject the virtual sensor setup.
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTrackerCount(_session: OvrSession) -> u32 {
+    log_call("ovr_GetTrackerCount");
+    // Rift S uses inside-out tracking. Reporting CV1 cameras alongside a Rift
+    // S HMD makes Echo enter its external-sensor validation screen.
+    0
+}
+
+/// Report the two Touch-style controllers exposed by the OpenXR runtime. Input
+/// values remain neutral until action bindings are added, but connectivity must
+/// be truthful and deterministic for Echo's device validation.
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetConnectedControllerTypes(_session: OvrSession) -> u32 {
+    log_call("ovr_GetConnectedControllerTypes");
+    0x3 // ovrControllerType_LTouch | ovrControllerType_RTouch
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_GetTrackingOriginType(_session: OvrSession) -> i32 {
+    log_call("ovr_GetTrackingOriginType");
+    1 // ovrTrackingOrigin_FloorLevel
+}
+
+/// `ovr_GetPerfStats` returns an `ovrResult`; it was previously emitted as a
+/// void resolver stub, leaving Echo to read an arbitrary failure code.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetPerfStats(
+    _session: OvrSession,
+    out_stats: *mut core::ffi::c_void,
+) -> OvrResult {
+    log_call("ovr_GetPerfStats");
+    // The leading fields of CAPI perf stats are counters/timestamps. Zeroing a
+    // conservative prefix reports no dropped frames without assuming a newer
+    // SDK's complete private layout.
+    if !out_stats.is_null() {
+        unsafe { core::ptr::write_bytes(out_stats, 0, 64) };
+    }
+    OVR_SUCCESS
+}
+
+/// CAPI property setters return `ovrBool`, not void.
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_SetBool(
+    _session: OvrSession,
+    _property_name: *const c_char,
+    _value: u8,
+) -> u8 {
+    log_call("ovr_SetBool");
+    1
 }
 
 #[unsafe(no_mangle)]
@@ -357,7 +752,15 @@ pub unsafe extern "system" fn ovr_GetSessionStatus(
 pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
     log_call("ovr_GetHmdDesc");
     let mut product = [0; 64];
-    for (slot, byte) in product.iter_mut().zip(b"OpenXR HMD") {
+    for (slot, byte) in product.iter_mut().zip(b"Oculus Rift S") {
+        *slot = *byte as c_char;
+    }
+    let mut manufacturer = [0; 64];
+    for (slot, byte) in manufacturer.iter_mut().zip(b"Oculus") {
+        *slot = *byte as c_char;
+    }
+    let mut serial = [0; 24];
+    for (slot, byte) in serial.iter_mut().zip(b"OPENXR-RIFTS-0001") {
         *slot = *byte as c_char;
     }
     let fov = OvrFovPort {
@@ -367,8 +770,14 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
         right_tan: 1.0,
     };
     OvrHmdDesc {
-        hmd_type: 9, // ovrHmd_Other
+        hmd_type: 15, // ovrHmd_RiftS
         product_name: product,
+        manufacturer,
+        vendor_id: 0x2833,
+        product_id: 0x021e,
+        serial_number: serial,
+        firmware_major: 1,
+        firmware_minor: 0,
         resolution: crate::abi::OvrSizei { w: 1832, h: 1920 },
         default_eye_fov: [fov; 2],
         max_eye_fov: [fov; 2],
@@ -483,21 +892,21 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         let get_device: GetDevice = unsafe { core::mem::transmute(*queue_vtable.add(7)) };
         let mut d3d12_device = core::ptr::null_mut();
         let device_result = unsafe { get_device(queue, &IID_ID3D12_DEVICE, &mut d3d12_device) };
-        if std::env::var_os("LIBOVR_OPENXR_D3D12_PROBE").is_some() {
-            #[cfg(windows)]
-            match unsafe { crate::openxr_backend::probe_d3d12_session(d3d12_device, queue) } {
-                Ok(()) => log_call("openxr D3D12 session probe ok"),
-                Err(error) => log_call(&format!("openxr D3D12 session probe failed: {error}")),
-            }
-        }
-        let release: Release = unsafe { core::mem::transmute(*queue_vtable.add(2)) };
-        unsafe { release(queue) };
         if device_result < 0 {
             log_call(&format!(
                 "ovr_CreateTextureSwapChainDX D3D12 GetDevice failed hr={device_result:#x}"
             ));
+            let release: Release = unsafe { core::mem::transmute(*queue_vtable.add(2)) };
+            unsafe { release(queue) };
             return device_result;
         }
+        #[cfg(windows)]
+        match unsafe { ensure_d3d12_session(d3d12_device, queue) } {
+            Ok(()) => log_call("openxr D3D12 session retained"),
+            Err(error) => log_call(&format!("openxr D3D12 session creation failed: {error}")),
+        }
+        let release: Release = unsafe { core::mem::transmute(*queue_vtable.add(2)) };
+        unsafe { release(queue) };
         // ovrTextureFormat values are an Oculus enum, not raw DXGI_FORMAT
         // values. Echo uses RGBA8 sRGB (5) for color and D24S8 (12) for its
         // depth chain. D3D12 requires a typeless resource for the latter.
@@ -550,11 +959,44 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         } else {
             core::ptr::null()
         };
-        let mut textures = match SWAP_TEXTURES.lock() {
-            Ok(textures) => textures,
-            Err(_) => return -1000,
-        };
-        for texture in textures.iter_mut() {
+        #[cfg(windows)]
+        if desc.bind_flags & 1 != 0 {
+            if let Ok(mut slot) = XR_D3D12_SESSION.lock() {
+                if let Some(session) = slot.as_mut() {
+                    match session.create_color_swapchain(
+                        resource_desc.format,
+                        desc.width.max(1) as u32,
+                        desc.height.max(1) as u32,
+                        desc.array_size.max(1) as u32,
+                        desc.mip_levels.max(1) as u32,
+                        desc.sample_count.max(1) as u32,
+                    ) {
+                        Ok(images) if images.len() >= 3 => {
+                            let textures = [images[0], images[1], images[2]];
+                            let release: Release =
+                                unsafe { core::mem::transmute(*device_vtable.add(2)) };
+                            unsafe { release(d3d12_device) };
+                            let chain = match register_swap_chain(textures, true) {
+                                Ok(chain) => chain,
+                                Err(error) => return error,
+                            };
+                            unsafe { *out_chain = chain };
+                            log_call("ovr_CreateTextureSwapChainDX using OpenXR D3D12 images");
+                            return OVR_SUCCESS;
+                        }
+                        Ok(images) => log_call(&format!(
+                            "OpenXR color swapchain returned only {} images",
+                            images.len()
+                        )),
+                        Err(error) => {
+                            log_call(&format!("OpenXR color swapchain creation failed: {error}"))
+                        }
+                    }
+                }
+            }
+        }
+        let mut textures = [0; 3];
+        for texture in &mut textures {
             let mut created = core::ptr::null_mut();
             let result = unsafe {
                 create(
@@ -579,14 +1021,21 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         let release: Release = unsafe { core::mem::transmute(*device_vtable.add(2)) };
         unsafe { release(d3d12_device) };
         log_call(&format!(
-            "ovr_CreateTextureSwapChainDX D3D12 {}x{} format={} bind={:#x} flags={:#x}",
+            "ovr_CreateTextureSwapChainDX D3D12 {}x{} array={} mip={} samples={} format={} bind={:#x} flags={:#x}",
             resource_desc.width,
             resource_desc.height,
+            resource_desc.depth_or_array_size,
+            resource_desc.mip_levels,
+            resource_desc.sample_count,
             resource_desc.format,
             desc.bind_flags,
             resource_desc.flags
         ));
-        unsafe { *out_chain = (&SWAP_CHAIN_TOKEN as *const u8).cast_mut().cast() };
+        let chain = match register_swap_chain(textures, false) {
+            Ok(chain) => chain,
+            Err(error) => return error,
+        };
+        unsafe { *out_chain = chain };
         return OVR_SUCCESS;
     }
     let d3d_desc = D3d11Texture2dDesc {
@@ -608,11 +1057,8 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
     };
     let vtable = unsafe { *(_d3d_device as *const *const *const core::ffi::c_void) };
     let create: CreateTexture2d = unsafe { core::mem::transmute(*vtable.add(5)) };
-    let mut textures = match SWAP_TEXTURES.lock() {
-        Ok(textures) => textures,
-        Err(_) => return -1000,
-    };
-    for texture in textures.iter_mut() {
+    let mut textures = [0; 3];
+    for texture in &mut textures {
         let mut created = core::ptr::null_mut();
         let result = unsafe { create(_d3d_device, &d3d_desc, core::ptr::null(), &mut created) };
         if result < 0 {
@@ -624,7 +1070,11 @@ pub unsafe extern "system" fn ovr_CreateTextureSwapChainDX(
         }
         *texture = created as usize;
     }
-    unsafe { *out_chain = (&SWAP_CHAIN_TOKEN as *const u8).cast_mut().cast() };
+    let chain = match register_swap_chain(textures, false) {
+        Ok(chain) => chain,
+        Err(error) => return error,
+    };
+    unsafe { *out_chain = chain };
     OVR_SUCCESS
 }
 
@@ -657,14 +1107,13 @@ pub unsafe extern "system" fn ovr_GetTextureSwapChainBufferDX(
     out_buffer: *mut *mut core::ffi::c_void,
 ) -> OvrResult {
     log_call("ovr_GetTextureSwapChainBufferDX");
-    if out_buffer.is_null() || !(0..3).contains(&index) {
+    if out_buffer.is_null() {
         return -1005;
     }
-    let textures = match SWAP_TEXTURES.lock() {
-        Ok(textures) => textures,
-        Err(_) => return -1000,
+    let texture = match swap_chain_texture(_chain, index) {
+        Ok(texture) => texture as *mut core::ffi::c_void,
+        Err(error) => return error,
     };
-    let texture = textures[index as usize] as *mut core::ffi::c_void;
     if texture.is_null() {
         return -1004;
     }
@@ -716,10 +1165,8 @@ unresolved_exports!(
     ovr_GetBoundaryDimensions,
     ovr_GetBoundaryGeometry,
     ovr_GetBoundaryVisible,
-    ovr_GetConnectedControllerTypes,
     ovr_GetControllerVibrationState,
     ovr_GetDeviceExtensionsVk,
-    ovr_GetDevicePoses,
     ovr_GetExternalCameras,
     ovr_GetFloat,
     ovr_GetFloatArray,
@@ -730,16 +1177,12 @@ unresolved_exports!(
     ovr_GetMirrorTextureBufferDX,
     ovr_GetMirrorTextureBufferGL,
     ovr_GetMirrorTextureBufferVk,
-    ovr_GetPerfStats,
     ovr_GetSessionPhysicalDeviceVk,
     ovr_GetString,
     ovr_GetTextureSwapChainBufferGL,
     ovr_GetTextureSwapChainBufferVk,
     ovr_GetTextureSwapChainDesc,
     ovr_GetTouchHapticsDesc,
-    ovr_GetTrackerCount,
-    ovr_GetTrackerDesc,
-    ovr_GetTrackingOriginType,
     ovr_IdentifyClient,
     ovr_IsExtensionSupported,
     ovr_Lookup,
@@ -748,7 +1191,6 @@ unresolved_exports!(
     ovr_RequestBoundaryVisible,
     ovr_ResetBoundaryLookAndFeel,
     ovr_ResetPerfStats,
-    ovr_SetBool,
     ovr_SetBoundaryLookAndFeel,
     ovr_SetClientColorDesc,
     ovr_SetControllerVibration,

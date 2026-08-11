@@ -94,9 +94,14 @@ prefix is isolated at `artifacts/proton-experimental-prefix`; this avoids
 mixing Wine/OpenXR registry state with earlier Proton 11 tests. It does not
 install or replace Proton.
 
-For repeated headsetless boot attempts, use `tools/run-monado-game.sh` rather
-than manually starting Monado, sourcing its environment, and launching Echo.
-Pass `--no-build` when the Windows DLL is already current.
+For repeated headsetless boot attempts, `tools/run-monado-game.sh` starts and
+selects the project's disposable simulated-HMD/null-compositor runtime. Pass
+`--no-build` when the Windows DLL is already current.
+
+> If Monado is already running separately (for example with the Qwerty driver),
+> do **not** use either `run-monado-*.sh` wrapper: launch with
+> `tools/run-game.sh` from `nix-shell`. It preserves the active host OpenXR
+> runtime and applies the required xrizer `VR_OVERRIDE` itself.
 
 ## Build targets
 

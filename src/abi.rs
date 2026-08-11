@@ -156,6 +156,36 @@ pub struct OvrTrackerPose {
     pub status_flags: u32,
 }
 
+/// CAPI 1.94 `ovrTrackerDesc` returned by value from `ovr_GetTrackerDesc`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrTrackerDesc {
+    pub frustum_hfov_in_radians: f32,
+    pub frustum_vfov_in_radians: f32,
+    pub frustum_near_z_in_meters: f32,
+    pub frustum_far_z_in_meters: f32,
+}
+
+/// Prefix common to all LibOVR composition layers.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OvrLayerHeader {
+    pub layer_type: i32,
+    pub flags: u32,
+}
+
+/// CAPI 1.94 `ovrLayerEyeFov`, the stereo color layer submitted by Echo.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OvrLayerEyeFov {
+    pub header: OvrLayerHeader,
+    pub color_texture: [OvrTextureSwapChain; 2],
+    pub viewport: [OvrRecti; 2],
+    pub render_pose: [OvrPosef; 2],
+    pub fov: [OvrFovPort; 2],
+    pub sensor_sample_time: f64,
+}
+
 /// CAPI 1.94 `ovrEyeRenderDesc`; returned by value by `ovr_GetRenderDesc2`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
