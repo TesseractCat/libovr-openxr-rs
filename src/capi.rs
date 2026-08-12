@@ -306,19 +306,29 @@ pub extern "system" fn ovr_GetTrackingState(
                     time_in_seconds: absolute_time,
                     ..Default::default()
                 },
-                hand_poses: session.hand_poses.map(|hand| crate::abi::OvrPoseStatef {
+                hand_poses: core::array::from_fn(|index| crate::abi::OvrPoseStatef {
                     pose: crate::abi::OvrPosef {
                         orientation: crate::abi::OvrQuatf {
-                            x: hand.orientation.x,
-                            y: hand.orientation.y,
-                            z: hand.orientation.z,
-                            w: hand.orientation.w,
+                            x: session.hand_poses[index].orientation.x,
+                            y: session.hand_poses[index].orientation.y,
+                            z: session.hand_poses[index].orientation.z,
+                            w: session.hand_poses[index].orientation.w,
                         },
                         position: OvrVector3f {
-                            x: hand.position.x,
-                            y: hand.position.y,
-                            z: hand.position.z,
+                            x: session.hand_poses[index].position.x,
+                            y: session.hand_poses[index].position.y,
+                            z: session.hand_poses[index].position.z,
                         },
+                    },
+                    angular_velocity: OvrVector3f {
+                        x: session.hand_angular_velocity[index].x,
+                        y: session.hand_angular_velocity[index].y,
+                        z: session.hand_angular_velocity[index].z,
+                    },
+                    linear_velocity: OvrVector3f {
+                        x: session.hand_linear_velocity[index].x,
+                        y: session.hand_linear_velocity[index].y,
+                        z: session.hand_linear_velocity[index].z,
                     },
                     time_in_seconds: absolute_time,
                     ..Default::default()
@@ -388,10 +398,30 @@ pub extern "system" fn ovr_GetInputState(
                 .map(|duration| duration.as_secs_f64())
                 .unwrap_or_default();
             for hand in 0..2 {
-                let selected = session.hand_select[hand] || session.hand_primary[hand];
-                if selected {
-                    // LibOVR Touch maps the primary left/right buttons to X/A.
+                // ovrButton: A/B/RThumb/RShoulder and X/Y/LThumb/LShoulder.
+                // The simple-controller select action remains a useful trigger
+                // fallback for runtimes without a vendor controller profile.
+                if session.hand_primary[hand] || session.hand_select[hand] {
                     state.buttons |= if hand == 0 { 0x0000_0100 } else { 0x0000_0001 };
+                }
+                if session.hand_secondary[hand] {
+                    state.buttons |= if hand == 0 { 0x0000_0200 } else { 0x0000_0002 };
+                }
+                if session.hand_thumbstick_click[hand] {
+                    state.buttons |= if hand == 0 { 0x0000_0400 } else { 0x0000_0004 };
+                }
+                if session.hand_menu[hand] {
+                    state.buttons |= if hand == 0 { 0x0000_0800 } else { 0x0000_0008 };
+                }
+                // ovrTouch: A/B/RThumb/RIndex and X/Y/LThumb/LIndex.
+                if session.hand_primary_touch[hand] {
+                    state.touches |= if hand == 0 { 0x0000_0100 } else { 0x0000_0001 };
+                }
+                if session.hand_secondary_touch[hand] {
+                    state.touches |= if hand == 0 { 0x0000_0200 } else { 0x0000_0002 };
+                }
+                if session.hand_thumbstick_touch[hand] {
+                    state.touches |= if hand == 0 { 0x0000_0400 } else { 0x0000_0004 };
                 }
                 let trigger = session.hand_trigger[hand].max(if session.hand_select[hand] {
                     1.0
@@ -400,7 +430,7 @@ pub extern "system" fn ovr_GetInputState(
                 });
                 state.index_trigger[hand] = trigger;
                 state.index_trigger_no_deadzone[hand] = trigger;
-                if trigger > 0.0 {
+                if session.hand_trigger_touch[hand] || trigger > 0.0 {
                     state.touches |= if hand == 0 { 0x0000_1000 } else { 0x0000_0010 };
                 }
                 state.hand_trigger[hand] = session.hand_squeeze[hand];
@@ -413,7 +443,11 @@ pub extern "system" fn ovr_GetInputState(
                 };
                 state.thumbstick_no_deadzone[hand] = state.thumbstick[hand];
                 state.thumbstick_raw[hand] = state.thumbstick[hand];
-                if selected || trigger > 0.0 || session.hand_squeeze[hand] > 0.0 {
+                if session.hand_select[hand]
+                    || session.hand_primary[hand]
+                    || trigger > 0.0
+                    || session.hand_squeeze[hand] > 0.0
+                {
                     log_call(&format!(
                         "ovr_GetInputState {} buttons={:#x} trigger={:.2} squeeze={:.2} stick=({:.2},{:.2})",
                         if hand == 0 { "left" } else { "right" },
