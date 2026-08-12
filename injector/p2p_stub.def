@@ -1,5 +1,0 @@
-LIBRARY LibOVRP2P64_1.dll
-EXPORTS
-  ?CreateConnectionFactory@p2p@oculus@@YAPEAVPeerConnectionFactory@12@AEBUConnectionFactoryOptions@12@@Z=p2p_create
-  ?FreeConnection@p2p@oculus@@YAXPEAVPeerConnection@12@@Z=p2p_free_connection
-  ?FreeConnectionFactory@p2p@oculus@@YAXPEAVPeerConnectionFactory@12@@Z=p2p_free_factory

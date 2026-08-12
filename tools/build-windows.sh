@@ -19,11 +19,3 @@ export RUSTFLAGS="-L native=$PWD/.nix-mingw${RUSTFLAGS:+ $RUSTFLAGS}"
 
 PATH="$toolchain_bin:$PATH" "$toolchain_bin/cargo" build \
   --target x86_64-pc-windows-gnu "$@"
-PATH="$toolchain_bin:$PATH" "$toolchain_bin/cargo" build \
-  --manifest-path injector/Cargo.toml \
-  --target-dir "$PWD/target" \
-  --target x86_64-pc-windows-gnu "$@"
-x86_64-w64-mingw32-gcc -municode -O2 -s injector/launcher.c \
-  -o target/x86_64-pc-windows-gnu/debug/ovr-loader-launcher.exe
-x86_64-w64-mingw32-gcc -shared -O2 -s injector/p2p_stub.c injector/p2p_stub.def \
-  -o target/x86_64-pc-windows-gnu/debug/LibOVRP2P64_1.dll
