@@ -9,8 +9,6 @@ game_exe="$game_root/bin/win10/echovr.exe"
 shim_source="$project_root/target/x86_64-pc-windows-gnu/debug/libovr_openxr.dll"
 shim_target="$game_root/bin/win10/LibOVRRT64_1.dll"
 platform_target="$game_root/bin/win10/LibOVRPlatform64_1.dll"
-prefix_root="${LIBOVR_OPENXR_PREFIX:-$project_root/artifacts/proton-prefix}/pfx"
-
 if [[ "${1:-}" == "--no-build" ]]; then
   shift
 else
@@ -26,9 +24,6 @@ command -v steam-run >/dev/null || { echo "steam-run is unavailable; enter nix-s
 # loader path; no suspended-process injection is used.
 cp "$shim_source" "$shim_target"
 cp "$shim_source" "$platform_target"
-# Use reg.exe rather than writing system.reg directly: Wine can otherwise
-# overwrite direct edits when its registry server exits.
-mkdir -p "$prefix_root"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-$HOME/.local/share/Steam}"
 export STEAM_COMPAT_DATA_PATH="${STEAM_COMPAT_DATA_PATH:-${LIBOVR_OPENXR_PREFIX:-$project_root/artifacts/proton-prefix}}"
 export STEAM_COMPAT_APP_ID="${STEAM_COMPAT_APP_ID:-0}"
@@ -38,14 +33,7 @@ export SteamGameId="${SteamGameId:-$STEAM_COMPAT_APP_ID}"
 # PROTON_NO_FSYNC; retain WINEFSYNC for Wine components that read it directly.
 export PROTON_NO_FSYNC="${PROTON_NO_FSYNC:-1}"
 export WINEFSYNC="${WINEFSYNC:-0}"
-# Proton's reg.exe intermittently returns 1 after committing changes while
-# tearing down fsync shared memory; continue so all values are attempted.
-proton_reg_add() {
-  steam-run "$LIBOVR_OPENXR_PROTON" run reg.exe add "$@" >/dev/null || \
-    printf 'warning: Proton reg.exe returned non-zero after add\n' >&2
-}
-# No Oculus Base registry deployment is required: Echo loads the adjacent
-# runtime images through its patched local loader path.
+# Echo loads the adjacent runtime images through its patched local loader path.
 # Proton uses its OpenVR availability check to enable WineOpenXR. xrizer
 # satisfies that check and forwards it to the active native OpenXR runtime.
 if [[ -n "${LIBOVR_OPENXR_XRIZER:-}" ]]; then

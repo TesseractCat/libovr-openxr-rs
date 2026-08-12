@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Create verified, game-local patches; originals are retained beside them."""
 import struct
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-WIN10 = ROOT / "bin" / "win10"
+
+def game_root_from_args() -> Path:
+    if len(sys.argv) != 2:
+        raise SystemExit(f"usage: {sys.argv[0]} game-directory")
+    return Path(sys.argv[1]).expanduser().resolve()
+
+
+WIN10 = game_root_from_args() / "bin" / "win10"
 
 
 def rva_offset(image: bytes, rva: int) -> int:
@@ -32,6 +39,14 @@ def patch(image: bytearray, rva: int, expected: bytes, replacement: bytes) -> No
     image[offset : offset + len(replacement)] = replacement
 
 
+def original_file(filename: str) -> Path:
+    current = WIN10 / filename
+    original = WIN10 / f"{filename}.original"
+    if not original.exists():
+        original.write_bytes(current.read_bytes())
+    return original
+
+
 # How these sites were determined (specific to the SHA-256-verified originals
 # retained below):
 #
@@ -54,7 +69,7 @@ def patch(image: bytearray, rva: int, expected: bytes, replacement: bytes) -> No
 
 # Echo's file-verification helper remains intact. Only its caller's conditional
 # branch is changed to follow the existing normal LoadLibraryW path.
-echo_original = WIN10 / "echovr.exe.original"
+echo_original = original_file("echovr.exe")
 echo = bytearray(echo_original.read_bytes())
 patch(echo, 0x1365B21, bytes.fromhex("85c07511"), bytes.fromhex("9090eb11"))
 (WIN10 / "echovr.exe").write_bytes(echo)
@@ -62,9 +77,7 @@ patch(echo, 0x1365B21, bytes.fromhex("85c07511"), bytes.fromhex("9090eb11"))
 # pnsovr's preloaded-platform failure branch changes from JE (return -2) to an
 # existing success-path JMP. This is the same two-byte in-memory patch formerly
 # applied by the deleted injector, now deterministic and game-local.
-pns_original = WIN10 / "pnsovr.dll.original"
-if not pns_original.exists():
-    pns_original.write_bytes((WIN10 / "pnsovr.dll").read_bytes())
+pns_original = original_file("pnsovr.dll")
 pns = bytearray(pns_original.read_bytes())
 patch(pns, 0x98B5A, bytes.fromhex("7427"), bytes.fromhex("eb27"))
 (WIN10 / "pnsovr.dll").write_bytes(pns)
