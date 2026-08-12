@@ -459,7 +459,7 @@ pub unsafe fn create_d3d12_session(
                 openxr::Binding::new(
                     &menu_action,
                     instance
-                        .string_to_path("/user/hand/left/input/menu/click")
+                        .string_to_path("/user/hand/left/input/system/click")
                         .map_err(|error| error.to_string())?,
                 ),
                 openxr::Binding::new(
@@ -667,14 +667,18 @@ pub unsafe fn create_d3d12_session(
             ],
         ),
     ] {
-        instance
-            .suggest_interaction_profile_bindings(
-                instance
-                    .string_to_path(profile)
-                    .map_err(|error| error.to_string())?,
-                &bindings,
-            )
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = instance.suggest_interaction_profile_bindings(
+            instance
+                .string_to_path(profile)
+                .map_err(|error| error.to_string())?,
+            &bindings,
+        ) {
+            // Optional profile mismatches must not prevent the base Touch or
+            // simple-controller session from starting.
+            crate::capi::log_call(&format!(
+                "OpenXR optional interaction profile {profile} unavailable: {error}"
+            ));
+        }
     }
     session
         .attach_action_sets(&[&input_action_set])
