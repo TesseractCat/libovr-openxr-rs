@@ -89,3 +89,35 @@ pub fn user_identity() -> &'static UserIdentity {
     static IDENTITY: OnceLock<UserIdentity> = OnceLock::new();
     IDENTITY.get_or_init(load_identity)
 }
+
+/// Return the Windows WASAPI endpoint ID for the system default device.
+///
+/// This is intentionally resolved inside the Wine/Windows environment rather
+/// than by inspecting Linux/PipeWire state. Proton exposes the active host
+/// audio device through WASAPI, which is the API LibOVR clients understand.
+#[cfg(windows)]
+pub fn default_audio_device_id(render: bool) -> Option<Vec<u16>> {
+    use windows::Win32::Media::Audio::{
+        IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    };
+
+    static COM_INITIALIZED: OnceLock<()> = OnceLock::new();
+    COM_INITIALIZED.get_or_init(|| {
+        // The calling thread may already use a different COM apartment. WASAPI
+        // still works when COM was initialized by the game, so only record the
+        // successful/common case and ignore an already-initialized apartment.
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    });
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()? };
+    let flow = if render { eRender } else { eCapture };
+    let device = unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok()? };
+    let id = unsafe { device.GetId().ok()? };
+    let result = unsafe { id.to_string().ok()? }.encode_utf16().collect();
+    unsafe { CoTaskMemFree(Some(id.0.cast())) };
+    Some(result)
+}

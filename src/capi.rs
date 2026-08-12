@@ -1109,11 +1109,12 @@ fn write_audio_guid(out_guid: *mut u16, guid: Option<&[u16]>, direction: &str) -
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_GetAudioDeviceOutGuidStr(out_guid: *mut u16) -> OvrResult {
     log_call("ovr_GetAudioDeviceOutGuidStr");
-    write_audio_guid(
-        out_guid,
-        crate::config::user_identity().audio_output_guid.as_deref(),
-        "output",
-    )
+    let configured = crate::config::user_identity().audio_output_guid.as_deref();
+    #[cfg(windows)]
+    let detected: Option<Vec<u16>> = crate::config::default_audio_device_id(true);
+    #[cfg(not(windows))]
+    let detected: Option<Vec<u16>> = None;
+    write_audio_guid(out_guid, configured.or(detected.as_deref()), "output")
 }
 
 /// # Safety
@@ -1121,11 +1122,12 @@ pub unsafe extern "system" fn ovr_GetAudioDeviceOutGuidStr(out_guid: *mut u16) -
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_GetAudioDeviceInGuidStr(out_guid: *mut u16) -> OvrResult {
     log_call("ovr_GetAudioDeviceInGuidStr");
-    write_audio_guid(
-        out_guid,
-        crate::config::user_identity().audio_input_guid.as_deref(),
-        "input",
-    )
+    let configured = crate::config::user_identity().audio_input_guid.as_deref();
+    #[cfg(windows)]
+    let detected: Option<Vec<u16>> = crate::config::default_audio_device_id(false);
+    #[cfg(not(windows))]
+    let detected: Option<Vec<u16>> = None;
+    write_audio_guid(out_guid, configured.or(detected.as_deref()), "input")
 }
 
 /// GUID-returning CAPI calls cannot represent a textual device endpoint.

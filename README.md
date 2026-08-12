@@ -52,6 +52,12 @@ The configuration generator writes beside `echovr.exe`, where the shim looks
 for `libovr-openxr.toml`. It does not modify the Windows registry or contact
 Oculus services.
 
+Audio device selection uses WASAPI inside the Windows/Proton environment. By
+default, the shim asks WASAPI for the system default render and capture
+endpoints, so the WiVRn device must be the default device exposed to Proton.
+The optional `[audio]` `output_guid` and `input_guid` settings override those
+endpoint IDs when needed.
+
 Both patches are guarded by expected-byte checks and the tool refuses an
 unsupported game build rather than patching it blindly. If either
 `.original` file does not exist, the tool copies the current `echovr.exe` or
