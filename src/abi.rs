@@ -219,7 +219,10 @@ pub struct OvrEyeRenderDesc {
     pub fov: OvrFovPort,
     pub distorted_viewport: OvrRecti,
     pub pixels_per_tan_angle_at_center: OvrVector2f,
-    pub hmd_to_eye_offset: OvrVector3f,
+    /// Echo's `ovr_GetRenderDesc2` ABI uses the modern full eye transform.
+    /// Returning only the obsolete three-float offset shifts these bytes into
+    /// the quaternion field, which corrupts Echo's RenderPose calculation.
+    pub hmd_to_eye_pose: OvrPosef,
 }
 
 /// CAPI 1.94 `ovrTextureSwapChainDesc`. DX texture creation only needs this

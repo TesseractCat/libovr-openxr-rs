@@ -1196,12 +1196,12 @@ impl D3d12Session {
         Ok(())
     }
 
-    /// Finish the frame using Echo's submitted viewport. The viewport is the
-    /// dynamic-resolution window. FOV and poses remain runtime-located: they
-    /// must agree with the shim's own HMD/render-desc projection.
+    /// Finish the frame using Echo's submitted viewport and projection. Echo
+    /// rendered these pixels with its layer FOV, so the compositor must use
+    /// the same projection; only the poses remain runtime-located.
     pub fn end_frame(
         &mut self,
-        submitted_rects: Option<[openxr::Rect2Di; 2]>,
+        submitted: Option<([openxr::Rect2Di; 2], [openxr::Fovf; 2])>,
     ) -> Result<(), String> {
         if self.frame_begun {
             let state = self
@@ -1218,6 +1218,33 @@ impl D3d12Session {
                 )
                 .map_err(|error| error.to_string())?
                 .1;
+            if runtime_views.len() >= 2 {
+                crate::capi::log_call(&format!(
+                    "OpenXR EndFrame runtime views left=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3}) fov=({:.3},{:.3},{:.3},{:.3}) right=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3}) fov=({:.3},{:.3},{:.3},{:.3})",
+                    runtime_views[0].pose.position.x,
+                    runtime_views[0].pose.position.y,
+                    runtime_views[0].pose.position.z,
+                    runtime_views[0].pose.orientation.x,
+                    runtime_views[0].pose.orientation.y,
+                    runtime_views[0].pose.orientation.z,
+                    runtime_views[0].pose.orientation.w,
+                    runtime_views[0].fov.angle_left.tan(),
+                    runtime_views[0].fov.angle_right.tan(),
+                    runtime_views[0].fov.angle_up.tan(),
+                    runtime_views[0].fov.angle_down.tan(),
+                    runtime_views[1].pose.position.x,
+                    runtime_views[1].pose.position.y,
+                    runtime_views[1].pose.position.z,
+                    runtime_views[1].pose.orientation.x,
+                    runtime_views[1].pose.orientation.y,
+                    runtime_views[1].pose.orientation.z,
+                    runtime_views[1].pose.orientation.w,
+                    runtime_views[1].fov.angle_left.tan(),
+                    runtime_views[1].fov.angle_right.tan(),
+                    runtime_views[1].fov.angle_up.tan(),
+                    runtime_views[1].fov.angle_down.tan(),
+                ));
+            }
             if let Some(swapchain) = self.color_swapchain.as_mut() {
                 swapchain
                     .release_image()
@@ -1230,9 +1257,9 @@ impl D3d12Session {
                 let projection_views: Vec<_> = (0..2)
                     .map(|eye| {
                         let view = &runtime_views[eye];
-                        let rect = submitted_rects
+                        let rect = submitted
                             .as_ref()
-                            .map(|rects| rects[eye])
+                            .map(|(rects, _)| rects[eye])
                             .unwrap_or_else(|| {
                                 let half_width = (width / 2) as i32;
                                 openxr::Rect2Di {
@@ -1246,7 +1273,10 @@ impl D3d12Session {
                                     },
                                 }
                             });
-                        let fov = view.fov;
+                        let fov = submitted
+                            .as_ref()
+                            .map(|(_, fovs)| fovs[eye])
+                            .unwrap_or(view.fov);
                         // Some runtimes return a zero pose while their view
                         // state is not valid. xrEndFrame rejects that outright;
                         // retain the last valid view pose, or derive a valid

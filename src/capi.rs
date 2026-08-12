@@ -769,6 +769,23 @@ pub unsafe extern "system" fn ovr_EndFrame(
                     eye_fov.fov[1].up_tan,
                     eye_fov.fov[1].down_tan,
                 ));
+                log_call(&format!(
+                    "ovr_EndFrame RenderPose left=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3}) right=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3})",
+                    eye_fov.render_pose[0].position.x,
+                    eye_fov.render_pose[0].position.y,
+                    eye_fov.render_pose[0].position.z,
+                    eye_fov.render_pose[0].orientation.x,
+                    eye_fov.render_pose[0].orientation.y,
+                    eye_fov.render_pose[0].orientation.z,
+                    eye_fov.render_pose[0].orientation.w,
+                    eye_fov.render_pose[1].position.x,
+                    eye_fov.render_pose[1].position.y,
+                    eye_fov.render_pose[1].position.z,
+                    eye_fov.render_pose[1].orientation.x,
+                    eye_fov.render_pose[1].orientation.y,
+                    eye_fov.render_pose[1].orientation.z,
+                    eye_fov.render_pose[1].orientation.w,
+                ));
             } else {
                 log_call("ovr_EndFrame unsupported layer type");
             }
@@ -783,7 +800,7 @@ pub unsafe extern "system" fn ovr_EndFrame(
                     let header = unsafe { &*layer.cast::<OvrLayerHeader>() };
                     if matches!(header.layer_type, 1 | 2) {
                         let eye_fov = unsafe { &*layer.cast::<OvrLayerEyeFov>() };
-                        let views = core::array::from_fn(|eye| {
+                        let rects = core::array::from_fn(|eye| {
                             let viewport = eye_fov.viewport[eye];
                             openxr::Rect2Di {
                                 offset: openxr::Offset2Di {
@@ -796,12 +813,24 @@ pub unsafe extern "system" fn ovr_EndFrame(
                                 },
                             }
                         });
+                        // CAPI tangents map directly to OpenXR angles. CAPI's
+                        // up/left are positive tangents, while OpenXR stores
+                        // signed angles from the forward axis.
+                        let fovs = core::array::from_fn(|eye| {
+                            let fov = eye_fov.fov[eye];
+                            openxr::Fovf {
+                                angle_left: (-fov.left_tan).atan(),
+                                angle_right: fov.right_tan.atan(),
+                                angle_up: fov.up_tan.atan(),
+                                angle_down: (-fov.down_tan).atan(),
+                            }
+                        });
                         // Error/UI submissions contain an all-zero layer. Do
                         // not pass invalid OpenXR rectangles in that case.
-                        (views
+                        (rects
                             .iter()
                             .all(|rect| rect.extent.width > 0 && rect.extent.height > 0))
-                        .then_some(views)
+                        .then_some((rects, fovs))
                     } else {
                         None
                     }
@@ -1143,7 +1172,7 @@ pub extern "system" fn ovr_GetRenderDesc2(
         eye,
         fov,
         pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
-        hmd_to_eye_offset: {
+        hmd_to_eye_pose: {
             #[cfg(windows)]
             if let Ok(slot) = XR_D3D12_SESSION.lock() {
                 if let Some(session) = slot.as_ref() {
@@ -1154,25 +1183,37 @@ pub extern "system" fn ovr_GetRenderDesc2(
                         eye,
                         fov,
                         pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
-                        hmd_to_eye_offset: {
+                        hmd_to_eye_pose: {
                             log_call(&format!(
                                 "ovr_GetRenderDesc2 eye={} runtime hmd_to_eye=({:.4},{:.4},{:.4})",
                                 eye, offset.x, offset.y, offset.z
                             ));
-                            OvrVector3f {
-                                x: offset.x,
-                                y: offset.y,
-                                z: offset.z,
+                            crate::abi::OvrPosef {
+                                orientation: crate::abi::OvrQuatf {
+                                    w: 1.0,
+                                    ..Default::default()
+                                },
+                                position: OvrVector3f {
+                                    x: offset.x,
+                                    y: offset.y,
+                                    z: offset.z,
+                                },
                             }
                         },
                         ..OvrEyeRenderDesc::default()
                     };
                 }
             }
-            OvrVector3f {
-                x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
-                y: 0.0,
-                z: 0.0,
+            crate::abi::OvrPosef {
+                orientation: crate::abi::OvrQuatf {
+                    w: 1.0,
+                    ..Default::default()
+                },
+                position: OvrVector3f {
+                    x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
+                    y: 0.0,
+                    z: 0.0,
+                },
             }
         },
         ..OvrEyeRenderDesc::default()
