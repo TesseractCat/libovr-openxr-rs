@@ -33,9 +33,13 @@ fn config_path() -> Option<PathBuf> {
 }
 
 fn load_identity() -> UserIdentity {
-    let config = config_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|contents| toml::from_str::<FileConfig>(&contents).ok())
+    let path = config_path();
+    let contents = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let config = contents
+        .as_deref()
+        .and_then(|contents| toml::from_str::<FileConfig>(contents).ok())
         .unwrap_or(FileConfig {
             user: UserConfig::default(),
         });
@@ -46,11 +50,20 @@ fn load_identity() -> UserIdentity {
     let oculus_id = CString::new(name)
         .unwrap_or_else(|_| CString::new("OpenXRLocalUser").expect("literal has no NUL"));
     let id = config.user.id.unwrap_or(1);
-    UserIdentity {
+    let identity = UserIdentity {
         id,
         org_id: config.user.org_id.unwrap_or(id),
         oculus_id,
-    }
+    };
+    crate::capi::log_call(&format!(
+        "libovr config path={} read={} user_id={} org_id={}",
+        path.as_ref()
+            .map_or_else(|| "<none>".to_owned(), |path| path.display().to_string()),
+        contents.is_some(),
+        identity.id,
+        identity.org_id,
+    ));
+    identity
 }
 
 pub fn user_identity() -> &'static UserIdentity {
