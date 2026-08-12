@@ -365,9 +365,16 @@ pub extern "system" fn ovr_User_GetNextUserArrayPage(_handle: *const c_void) -> 
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_User_GetOrgScopedID(_user_id: u64) -> u64 {
-    crate::capi::log_call("ovr_User_GetOrgScopedID");
-    queue_message(MESSAGE_USER_GET_ORG_SCOPED_ID, 0)
+pub extern "system" fn ovr_User_GetOrgScopedID(user_id: u64) -> u64 {
+    let request_id = queue_message(
+        MESSAGE_USER_GET_ORG_SCOPED_ID,
+        (local_org() as *const PlatformUser) as usize,
+    );
+    crate::capi::log_call(&format!(
+        "ovr_User_GetOrgScopedID user_id={user_id} -> request={request_id} org_handle={:p}",
+        local_org()
+    ));
+    request_id
 }
 
 #[unsafe(no_mangle)]
@@ -1058,8 +1065,9 @@ pub extern "system" fn ovr_Room_GetUsers(_obj: *const c_void) -> *const c_void {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_OrgScopedID_GetID(obj: *const c_void) -> u64 {
-    crate::capi::log_call("ovr_OrgScopedID_GetID");
-    unsafe { obj.cast::<PlatformUser>().as_ref() }.map_or(0, |org| org.id)
+    let id = unsafe { obj.cast::<PlatformUser>().as_ref() }.map_or(0, |org| org.id);
+    crate::capi::log_call(&format!("ovr_OrgScopedID_GetID handle={obj:p} -> {id}"));
+    id
 }
 
 #[unsafe(no_mangle)]
@@ -1247,9 +1255,17 @@ pub extern "system" fn ovr_Message_GetError(_obj: *const c_void) -> *const c_voi
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Message_GetOrgScopedID(_obj: *const c_void) -> *const c_void {
-    crate::capi::log_call("ovr_Message_GetOrgScopedID");
-    (local_org() as *const PlatformUser).cast()
+pub unsafe extern "system" fn ovr_Message_GetOrgScopedID(message: *const c_void) -> *const c_void {
+    let handle = unsafe { message.cast::<PlatformMessage>().as_ref() }
+        .and_then(|message| {
+            (message.message_type == MESSAGE_USER_GET_ORG_SCOPED_ID)
+                .then_some(message.payload as *const c_void)
+        })
+        .unwrap_or_else(|| (local_org() as *const PlatformUser).cast());
+    crate::capi::log_call(&format!(
+        "ovr_Message_GetOrgScopedID message={message:p} -> {handle:p}"
+    ));
+    handle
 }
 
 #[unsafe(no_mangle)]
@@ -1291,8 +1307,12 @@ pub unsafe extern "system" fn ovr_Message_GetType(message: *const c_void) -> u32
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_Message_GetUser(message: *const c_void) -> *mut c_void {
     let user = unsafe { message.cast::<PlatformMessage>().as_ref() }
-        .map_or(core::ptr::null_mut(), |message| message.payload as *mut c_void);
-    crate::capi::log_call(&format!("ovr_Message_GetUser message={message:p} -> {user:p}"));
+        .map_or(core::ptr::null_mut(), |message| {
+            message.payload as *mut c_void
+        });
+    crate::capi::log_call(&format!(
+        "ovr_Message_GetUser message={message:p} -> {user:p}"
+    ));
     user
 }
 
