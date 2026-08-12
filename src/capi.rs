@@ -745,30 +745,22 @@ pub unsafe extern "system" fn ovr_EndFrame(
                         let eye_fov = unsafe { &*layer.cast::<OvrLayerEyeFov>() };
                         let views = core::array::from_fn(|eye| {
                             let viewport = eye_fov.viewport[eye];
-                            (
-                                openxr::Rect2Di {
-                                    offset: openxr::Offset2Di {
-                                        x: viewport.pos.x,
-                                        y: viewport.pos.y,
-                                    },
-                                    extent: openxr::Extent2Di {
-                                        width: viewport.size.w,
-                                        height: viewport.size.h,
-                                    },
+                            openxr::Rect2Di {
+                                offset: openxr::Offset2Di {
+                                    x: viewport.pos.x,
+                                    y: viewport.pos.y,
                                 },
-                                openxr::Fovf {
-                                    angle_left: eye_fov.fov[eye].left_tan.atan(),
-                                    angle_right: eye_fov.fov[eye].right_tan.atan(),
-                                    angle_up: eye_fov.fov[eye].up_tan.atan(),
-                                    angle_down: eye_fov.fov[eye].down_tan.atan(),
+                                extent: openxr::Extent2Di {
+                                    width: viewport.size.w,
+                                    height: viewport.size.h,
                                 },
-                            )
+                            }
                         });
                         // Error/UI submissions contain an all-zero layer. Do
                         // not pass invalid OpenXR rectangles in that case.
                         (views
                             .iter()
-                            .all(|(rect, _)| rect.extent.width > 0 && rect.extent.height > 0))
+                            .all(|rect| rect.extent.width > 0 && rect.extent.height > 0))
                         .then_some(views)
                     } else {
                         None

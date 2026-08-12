@@ -1053,12 +1053,12 @@ impl D3d12Session {
         Ok(())
     }
 
-    /// Finish the frame using Echo's submitted viewport/FOV. The viewport is
-    /// the dynamic-resolution window. Poses remain runtime-located because
-    /// Echo's legacy `RenderPose` requires a complete ovr_CalcEyePoses path.
+    /// Finish the frame using Echo's submitted viewport. The viewport is the
+    /// dynamic-resolution window. FOV and poses remain runtime-located: they
+    /// must agree with the shim's own HMD/render-desc projection.
     pub fn end_frame(
         &mut self,
-        submitted_views: Option<[(openxr::Rect2Di, openxr::Fovf); 2]>,
+        submitted_rects: Option<[openxr::Rect2Di; 2]>,
     ) -> Result<(), String> {
         if self.frame_begun {
             let state = self
@@ -1087,25 +1087,23 @@ impl D3d12Session {
                 let projection_views: Vec<_> = (0..2)
                     .map(|eye| {
                         let view = &runtime_views[eye];
-                        let (rect, fov) = submitted_views
+                        let rect = submitted_rects
                             .as_ref()
-                            .map(|views| views[eye])
+                            .map(|rects| rects[eye])
                             .unwrap_or_else(|| {
                                 let half_width = (width / 2) as i32;
-                                (
-                                    openxr::Rect2Di {
-                                        offset: openxr::Offset2Di {
-                                            x: eye as i32 * half_width,
-                                            y: 0,
-                                        },
-                                        extent: openxr::Extent2Di {
-                                            width: half_width,
-                                            height: height as i32,
-                                        },
+                                openxr::Rect2Di {
+                                    offset: openxr::Offset2Di {
+                                        x: eye as i32 * half_width,
+                                        y: 0,
                                     },
-                                    view.fov,
-                                )
+                                    extent: openxr::Extent2Di {
+                                        width: half_width,
+                                        height: height as i32,
+                                    },
+                                }
                             });
+                        let fov = view.fov;
                         let pose = view.pose;
                         openxr::CompositionLayerProjectionView::new()
                             .pose(pose)
