@@ -32,6 +32,26 @@ def patch(image: bytearray, rva: int, expected: bytes, replacement: bytes) -> No
     image[offset : offset + len(replacement)] = replacement
 
 
+# How these sites were determined (specific to the SHA-256-verified originals
+# retained below):
+#
+# 1. Disassemble echovr.exe (`objdump -d -Mintel echovr.exe`) and follow the
+#    local DLL-loader path. At RVA 0x1365b1c it calls the file verification
+#    helper; the immediately following `test eax,eax; jne +0x11` at 0x1365b21
+#    selects the existing LoadLibraryW path only when verification succeeds.
+#    NOP the test and turn JNE into JMP, retaining the verifier's ABI/function
+#    body while always selecting that already-existing load path.
+#
+# 2. The former runtime bypass had identified pnsovr's PreLoaded result branch.
+#    PE section/RVA translation and a fresh disassembly verify that RVA 0x98b5a
+#    contains `je +0x27`; its fall-through stores -2
+#    (ovrPlatformInitialize_PreLoaded). Changing only JE to JMP takes pnsovr's
+#    own existing Platform API resolution path. The expected-byte checks below
+#    deliberately reject a different game/pnsovr build instead of patching it.
+#
+# The original files are never modified; this script reconstructs patched game
+# files from them on every execution.
+
 # Echo's file-verification helper remains intact. Only its caller's conditional
 # branch is changed to follow the existing normal LoadLibraryW path.
 echo_original = WIN10 / "echovr.exe.original"
