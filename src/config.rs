@@ -9,6 +9,14 @@ use std::sync::OnceLock;
 struct FileConfig {
     #[serde(default)]
     user: UserConfig,
+    #[serde(default)]
+    audio: AudioConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AudioConfig {
+    output_guid: Option<String>,
+    input_guid: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -23,6 +31,8 @@ pub struct UserIdentity {
     pub id: u64,
     pub org_id: u64,
     pub oculus_id: CString,
+    pub audio_output_guid: Option<Vec<u16>>,
+    pub audio_input_guid: Option<Vec<u16>>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -42,6 +52,7 @@ fn load_identity() -> UserIdentity {
         .and_then(|contents| toml::from_str::<FileConfig>(contents).ok())
         .unwrap_or(FileConfig {
             user: UserConfig::default(),
+            audio: AudioConfig::default(),
         });
     let name = config
         .user
@@ -54,6 +65,14 @@ fn load_identity() -> UserIdentity {
         id,
         org_id: config.user.org_id.unwrap_or(id),
         oculus_id,
+        audio_output_guid: config
+            .audio
+            .output_guid
+            .map(|value| value.encode_utf16().collect()),
+        audio_input_guid: config
+            .audio
+            .input_guid
+            .map(|value| value.encode_utf16().collect()),
     };
     crate::capi::log_call(&format!(
         "libovr config path={} read={} user_id={} org_id={}",

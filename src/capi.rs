@@ -972,15 +972,89 @@ pub extern "system" fn ovr_GetFovTextureSize(
     }
 }
 
+fn write_audio_guid(out_guid: *mut u16, guid: Option<&[u16]>, direction: &str) -> OvrResult {
+    if out_guid.is_null() {
+        return -1005;
+    }
+    unsafe { core::ptr::write_bytes(out_guid, 0, OVR_AUDIO_MAX_DEVICE_STR_SIZE) };
+    if let Some(guid) = guid {
+        // The CAPI buffer is fixed-size and includes its terminating NUL.
+        let count = guid.len().min(OVR_AUDIO_MAX_DEVICE_STR_SIZE - 1);
+        unsafe { core::ptr::copy_nonoverlapping(guid.as_ptr(), out_guid, count) };
+        log_call(&format!("ovr audio {direction} GUID configured"));
+    } else {
+        // Empty means WAVE_MAPPER/default device, letting PipeWire/Wine route
+        // to the headset sink/source selected by the user.
+        log_call(&format!(
+            "ovr audio {direction} uses Windows default device"
+        ));
+    }
+    OVR_SUCCESS
+}
+
 /// # Safety
 /// `out_guid` must point to `OVR_AUDIO_MAX_DEVICE_STR_SIZE` UTF-16 code units.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn ovr_GetAudioDeviceOutGuidStr(out_guid: *mut u16) -> OvrResult {
     log_call("ovr_GetAudioDeviceOutGuidStr");
+    write_audio_guid(
+        out_guid,
+        crate::config::user_identity().audio_output_guid.as_deref(),
+        "output",
+    )
+}
+
+/// # Safety
+/// `out_guid` must point to `OVR_AUDIO_MAX_DEVICE_STR_SIZE` UTF-16 code units.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceInGuidStr(out_guid: *mut u16) -> OvrResult {
+    log_call("ovr_GetAudioDeviceInGuidStr");
+    write_audio_guid(
+        out_guid,
+        crate::config::user_identity().audio_input_guid.as_deref(),
+        "input",
+    )
+}
+
+/// GUID-returning CAPI calls cannot represent a textual device endpoint.
+/// A zero GUID deliberately requests Wine's default multimedia endpoint.
+unsafe fn write_default_audio_guid(out_guid: *mut Guid) -> OvrResult {
     if out_guid.is_null() {
         return -1005;
     }
-    unsafe { core::ptr::write_bytes(out_guid, 0, OVR_AUDIO_MAX_DEVICE_STR_SIZE) };
+    unsafe { core::ptr::write_bytes(out_guid, 0, 1) };
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceOutGuid(out_guid: *mut Guid) -> OvrResult {
+    log_call("ovr_GetAudioDeviceOutGuid");
+    unsafe { write_default_audio_guid(out_guid) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceInGuid(out_guid: *mut Guid) -> OvrResult {
+    log_call("ovr_GetAudioDeviceInGuid");
+    unsafe { write_default_audio_guid(out_guid) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceOutWaveId(out_id: *mut u32) -> OvrResult {
+    log_call("ovr_GetAudioDeviceOutWaveId");
+    if out_id.is_null() {
+        return -1005;
+    }
+    unsafe { *out_id = u32::MAX }; // WAVE_MAPPER
+    OVR_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_GetAudioDeviceInWaveId(out_id: *mut u32) -> OvrResult {
+    log_call("ovr_GetAudioDeviceInWaveId");
+    if out_id.is_null() {
+        return -1005;
+    }
+    unsafe { *out_id = u32::MAX }; // WAVE_MAPPER
     OVR_SUCCESS
 }
 
@@ -1296,11 +1370,6 @@ unresolved_exports!(
     ovr_DestroyMirrorTexture,
     ovr_DestroyTextureSwapChain,
     ovr_EnableExtension,
-    ovr_GetAudioDeviceInGuid,
-    ovr_GetAudioDeviceInGuidStr,
-    ovr_GetAudioDeviceInWaveId,
-    ovr_GetAudioDeviceOutGuid,
-    ovr_GetAudioDeviceOutWaveId,
     ovr_GetBool,
     ovr_GetBoundaryDimensions,
     ovr_GetBoundaryGeometry,
