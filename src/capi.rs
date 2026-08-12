@@ -19,6 +19,7 @@ use crate::abi::{
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TRACKING_ORIGIN: AtomicI32 = AtomicI32::new(1);
+static LOGGING_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static LAST_LOGGED_TRACKING_STATUS: AtomicI32 = AtomicI32::new(-1);
 #[cfg(windows)]
 static XR_ADAPTER_LUID: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
@@ -200,6 +201,13 @@ fn swap_chain_texture(chain: OvrTextureSwapChain, index: i32) -> Result<usize, O
 }
 
 pub(crate) fn log_call(name: &str) {
+    // Per-frame file I/O is intentionally opt-in. Set this in Steam launch
+    // options (or the launcher environment) when collecting diagnostics.
+    if !*LOGGING_ENABLED.get_or_init(|| {
+        std::env::var_os("LIBOVR_OPENXR_LOG").is_some_and(|value| value != "0" && !value.is_empty())
+    }) {
+        return;
+    }
     let temp = std::env::var_os("TEMP").unwrap_or_else(|| "C:\\windows\\temp".into());
     let temp_path = std::path::PathBuf::from(temp).join("libovr-openxr.log");
     // Always write adjacent to echovr.exe too. Wine's TEMP may be an
@@ -1006,12 +1014,17 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
     for (slot, byte) in serial.iter_mut().zip(b"OPENXR-RIFTS-0001") {
         *slot = *byte as c_char;
     }
-    let fov = OvrFovPort {
+    // The descriptor is requested before Echo supplies its D3D device, so no
+    // OpenXR graphics session/views exist yet. Start with the portable legacy
+    // projection; subsequent render-descriptor requests use cached runtime
+    // view FOV once the session has initialized.
+    let left_fov = OvrFovPort {
         up_tan: 1.0,
         down_tan: 1.0,
         left_tan: 1.0,
         right_tan: 1.0,
     };
+    let right_fov = left_fov;
     OvrHmdDesc {
         hmd_type: 16, // ovrHmd_RiftS
         product_name: product,
@@ -1022,8 +1035,8 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
         firmware_major: 1,
         firmware_minor: 0,
         resolution: crate::abi::OvrSizei { w: 1832, h: 1920 },
-        default_eye_fov: [fov; 2],
-        max_eye_fov: [fov; 2],
+        default_eye_fov: [left_fov, right_fov],
+        max_eye_fov: [left_fov, right_fov],
         display_refresh_rate: 90,
         ..unsafe { core::mem::zeroed() }
     }
@@ -1168,6 +1181,24 @@ pub extern "system" fn ovr_GetRenderDesc2(
     fov: OvrFovPort,
 ) -> OvrEyeRenderDesc {
     log_call("ovr_GetRenderDesc2");
+    let mut fov = fov;
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            if session
+                .head_location_flags
+                .contains(openxr::SpaceLocationFlags::ORIENTATION_VALID)
+            {
+                let runtime_fov = session.view_fovs[if eye == OVR_EYE_LEFT { 0 } else { 1 }];
+                fov = OvrFovPort {
+                    up_tan: runtime_fov.angle_up.tan(),
+                    down_tan: -runtime_fov.angle_down.tan(),
+                    left_tan: -runtime_fov.angle_left.tan(),
+                    right_tan: runtime_fov.angle_right.tan(),
+                };
+            }
+        }
+    }
     OvrEyeRenderDesc {
         eye,
         fov,

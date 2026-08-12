@@ -30,6 +30,7 @@ pub struct D3d12Session {
     pub head_pose: openxr::Posef,
     pub head_location_flags: openxr::SpaceLocationFlags,
     pub view_poses: [openxr::Posef; 2],
+    pub view_fovs: [openxr::Fovf; 2],
     pub hand_poses: [openxr::Posef; 2],
     pub hand_location_flags: [openxr::SpaceLocationFlags; 2],
     pub input_action_set: openxr::ActionSet,
@@ -723,6 +724,12 @@ pub unsafe fn create_d3d12_session(
         head_pose: identity,
         head_location_flags: openxr::SpaceLocationFlags::EMPTY,
         view_poses: [identity; 2],
+        view_fovs: [openxr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        }; 2],
         hand_poses: [identity; 2],
         hand_location_flags: [openxr::SpaceLocationFlags::EMPTY; 2],
         input_action_set,
@@ -1021,6 +1028,7 @@ impl D3d12Session {
                 for (index, view) in views.iter().take(2).enumerate() {
                     if valid_orientation(view.pose) {
                         self.view_poses[index] = view.pose;
+                        self.view_fovs[index] = view.fov;
                         let previous = self.last_logged_view_poses[index];
                         if (view.pose.position.x - previous.position.x).abs() > 0.002
                             || (view.pose.position.y - previous.position.y).abs() > 0.002
