@@ -28,7 +28,10 @@ pub struct D3d12Session {
     pub space: openxr::Space,
     pub view_space: openxr::Space,
     pub head_pose: openxr::Posef,
+    pub head_location_flags: openxr::SpaceLocationFlags,
+    pub view_poses: [openxr::Posef; 2],
     pub hand_poses: [openxr::Posef; 2],
+    pub hand_location_flags: [openxr::SpaceLocationFlags; 2],
     pub input_action_set: openxr::ActionSet,
     pub select_action: openxr::Action<bool>,
     pub primary_action: openxr::Action<bool>,
@@ -57,6 +60,9 @@ pub struct D3d12Session {
     pub hand_squeeze: [f32; 2],
     pub hand_thumbstick: [openxr::Vector2f; 2],
     pub last_logged_hand_poses: [openxr::Posef; 2],
+    pub last_logged_head_pose: openxr::Posef,
+    pub last_logged_view_poses: [openxr::Posef; 2],
+    pub active_profiles: [Option<openxr::Path>; 2],
     /// OpenXR's safe Rust wrapper does not expose XR_SPACE_VELOCITY, so keep
     /// a finite-difference estimate at the same action-sync cadence.
     pub last_velocity_hand_poses: [openxr::Posef; 2],
@@ -715,7 +721,10 @@ pub unsafe fn create_d3d12_session(
         space,
         view_space,
         head_pose: identity,
+        head_location_flags: openxr::SpaceLocationFlags::EMPTY,
+        view_poses: [identity; 2],
         hand_poses: [identity; 2],
+        hand_location_flags: [openxr::SpaceLocationFlags::EMPTY; 2],
         input_action_set,
         select_action,
         primary_action,
@@ -744,6 +753,9 @@ pub unsafe fn create_d3d12_session(
         hand_squeeze: [0.0; 2],
         hand_thumbstick: [openxr::Vector2f { x: 0.0, y: 0.0 }; 2],
         last_logged_hand_poses: [identity; 2],
+        last_logged_head_pose: identity,
+        last_logged_view_poses: [identity; 2],
+        active_profiles: [None; 2],
         last_velocity_hand_poses: [identity; 2],
         last_velocity_sample: None,
         hand_linear_velocity: [openxr::Vector3f {
@@ -763,6 +775,65 @@ pub unsafe fn create_d3d12_session(
         color_image: None,
         color_extent: None,
     })
+}
+
+#[cfg(windows)]
+fn valid_orientation(pose: openxr::Posef) -> bool {
+    let q = pose.orientation;
+    let norm = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    norm.is_finite() && norm > 0.5 && norm < 1.5
+}
+
+#[cfg(windows)]
+pub fn hmd_to_eye_offset(head: openxr::Posef, eye: openxr::Posef) -> openxr::Vector3f {
+    // Transform the LOCAL-space eye displacement into HMD/view space. LibOVR
+    // requires this relative offset, not the absolute LOCAL eye position.
+    let dx = eye.position.x - head.position.x;
+    let dy = eye.position.y - head.position.y;
+    let dz = eye.position.z - head.position.z;
+    let q = head.orientation;
+    // conjugate(q) * displacement * q
+    let ix = q.w * dx - q.y * dz + q.z * dy;
+    let iy = q.w * dy - q.z * dx + q.x * dz;
+    let iz = q.w * dz - q.x * dy + q.y * dx;
+    let iw = q.x * dx + q.y * dy + q.z * dz;
+    openxr::Vector3f {
+        x: ix * q.w + iw * q.x + iy * q.z - iz * q.y,
+        y: iy * q.w + iw * q.y + iz * q.x - ix * q.z,
+        z: iz * q.w + iw * q.z + ix * q.y - iy * q.x,
+    }
+}
+
+#[cfg(windows)]
+fn stable_pose(previous: openxr::Posef, location: openxr::SpaceLocation) -> openxr::Posef {
+    let mut pose = previous;
+    if location
+        .location_flags
+        .contains(openxr::SpaceLocationFlags::ORIENTATION_VALID)
+        && valid_orientation(location.pose)
+    {
+        pose.orientation = location.pose.orientation;
+    }
+    if location
+        .location_flags
+        .contains(openxr::SpaceLocationFlags::POSITION_VALID)
+        && location.pose.position.x.is_finite()
+        && location.pose.position.y.is_finite()
+        && location.pose.position.z.is_finite()
+    {
+        pose.position = location.pose.position;
+    }
+    // `previous` begins as identity, but retain this final guard if a future
+    // runtime ever returns NaN or an invalid cached quaternion.
+    if !valid_orientation(pose) {
+        pose.orientation = openxr::Quaternionf {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        };
+    }
+    pose
 }
 
 #[cfg(windows)]
@@ -916,7 +987,60 @@ impl D3d12Session {
                 .expect("frame state set")
                 .predicted_display_time;
             if let Ok(location) = self.view_space.locate(&self.space, display_time) {
-                self.head_pose = location.pose;
+                self.head_pose = stable_pose(self.head_pose, location);
+                self.head_location_flags = location.location_flags;
+                let previous = self.last_logged_head_pose;
+                let pose = self.head_pose;
+                if (pose.position.x - previous.position.x).abs() > 0.002
+                    || (pose.position.y - previous.position.y).abs() > 0.002
+                    || (pose.position.z - previous.position.z).abs() > 0.002
+                    || (pose.orientation.x - previous.orientation.x).abs() > 0.002
+                    || (pose.orientation.y - previous.orientation.y).abs() > 0.002
+                    || (pose.orientation.z - previous.orientation.z).abs() > 0.002
+                    || (pose.orientation.w - previous.orientation.w).abs() > 0.002
+                {
+                    crate::capi::log_call(&format!(
+                        "OpenXR HMD flags={:?} pos=({:.3},{:.3},{:.3}) quat=({:.3},{:.3},{:.3},{:.3})",
+                        location.location_flags,
+                        pose.position.x,
+                        pose.position.y,
+                        pose.position.z,
+                        pose.orientation.x,
+                        pose.orientation.y,
+                        pose.orientation.z,
+                        pose.orientation.w,
+                    ));
+                    self.last_logged_head_pose = pose;
+                }
+            }
+            if let Ok((_, views)) = self.session.locate_views(
+                openxr::ViewConfigurationType::PRIMARY_STEREO,
+                display_time,
+                &self.space,
+            ) {
+                for (index, view) in views.iter().take(2).enumerate() {
+                    if valid_orientation(view.pose) {
+                        self.view_poses[index] = view.pose;
+                        let previous = self.last_logged_view_poses[index];
+                        if (view.pose.position.x - previous.position.x).abs() > 0.002
+                            || (view.pose.position.y - previous.position.y).abs() > 0.002
+                            || (view.pose.position.z - previous.position.z).abs() > 0.002
+                        {
+                            let offset = hmd_to_eye_offset(self.head_pose, view.pose);
+                            crate::capi::log_call(&format!(
+                                "OpenXR {} view pos=({:.3},{:.3},{:.3}) hmd_to_eye=({:.4},{:.4},{:.4})",
+                                if index == 0 { "left" } else { "right" },
+                                view.pose.position.x,
+                                view.pose.position.y,
+                                view.pose.position.z,
+                                offset.x,
+                                offset.y,
+                                offset.z,
+                            ));
+                            self.last_logged_view_poses[index] = view.pose;
+                        }
+                    }
+                }
             }
             self.session
                 .sync_actions(&[openxr::ActiveActionSet::new(&self.input_action_set)])
@@ -927,7 +1051,8 @@ impl D3d12Session {
                 .map(|previous| now.duration_since(previous).as_secs_f32());
             for (index, hand_space) in self.hand_spaces.iter().enumerate() {
                 if let Ok(location) = hand_space.locate(&self.space, display_time) {
-                    self.hand_poses[index] = location.pose;
+                    self.hand_poses[index] = stable_pose(self.hand_poses[index], location);
+                    self.hand_location_flags[index] = location.location_flags;
                     if let Some(dt) = velocity_dt.filter(|dt| (0.001..0.100).contains(dt)) {
                         let (linear, angular) = finite_difference_velocity(
                             self.last_velocity_hand_poses[index],
@@ -980,6 +1105,24 @@ impl D3d12Session {
                     self.instance.string_to_path("/user/hand/right")
                 };
                 if let Ok(hand_path) = hand_path {
+                    if let Ok(profile) = self.session.current_interaction_profile(hand_path) {
+                        // XR_NULL_PATH means no profile is active yet. It is
+                        // not legal to pass to xrPathToString; WiVRn reports
+                        // this transiently while controller activation settles.
+                        if profile != openxr::Path::NULL
+                            && self.active_profiles[index] != Some(profile)
+                        {
+                            let profile_name = self
+                                .instance
+                                .path_to_string(profile)
+                                .unwrap_or_else(|_| "<unknown>".to_owned());
+                            crate::capi::log_call(&format!(
+                                "OpenXR {} interaction profile={profile_name}",
+                                if index == 0 { "left" } else { "right" }
+                            ));
+                            self.active_profiles[index] = Some(profile);
+                        }
+                    }
                     if let Ok(state) = self.select_action.state(&self.session, hand_path) {
                         self.hand_select[index] = state.is_active && state.current_state;
                         if state.changed_since_last_sync {
@@ -1104,7 +1247,20 @@ impl D3d12Session {
                                 }
                             });
                         let fov = view.fov;
-                        let pose = view.pose;
+                        // Some runtimes return a zero pose while their view
+                        // state is not valid. xrEndFrame rejects that outright;
+                        // retain the last valid view pose, or derive a valid
+                        // eye pose from the current head pose until views are
+                        // available.
+                        let pose = if valid_orientation(view.pose) {
+                            view.pose
+                        } else if valid_orientation(self.view_poses[eye]) {
+                            self.view_poses[eye]
+                        } else {
+                            let mut pose = self.head_pose;
+                            pose.position.x += if eye == 0 { -0.032 } else { 0.032 };
+                            pose
+                        };
                         openxr::CompositionLayerProjectionView::new()
                             .pose(pose)
                             .fov(fov)

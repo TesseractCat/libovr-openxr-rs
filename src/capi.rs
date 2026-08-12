@@ -19,6 +19,7 @@ use crate::abi::{
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TRACKING_ORIGIN: AtomicI32 = AtomicI32::new(1);
+static LAST_LOGGED_TRACKING_STATUS: AtomicI32 = AtomicI32::new(-1);
 #[cfg(windows)]
 static XR_ADAPTER_LUID: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
 static SESSION_TOKEN: u8 = 1;
@@ -200,9 +201,20 @@ fn swap_chain_texture(chain: OvrTextureSwapChain, index: i32) -> Result<usize, O
 
 pub(crate) fn log_call(name: &str) {
     let temp = std::env::var_os("TEMP").unwrap_or_else(|| "C:\\windows\\temp".into());
-    let path = std::path::PathBuf::from(temp).join("libovr-openxr.log");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{name}");
+    let temp_path = std::path::PathBuf::from(temp).join("libovr-openxr.log");
+    // Always write adjacent to echovr.exe too. Wine's TEMP may be an
+    // unmapped/host-specific path in a new Steam prefix, while current_exe is
+    // the portable deployment location for this DLL.
+    let game_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("libovr-openxr.log")));
+    for path in std::iter::once(temp_path).chain(game_path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{name}");
+        }
     }
 }
 
@@ -300,6 +312,23 @@ pub extern "system" fn ovr_GetTrackingState(
                     z: pose.position.z,
                 },
             };
+            // Echo's legacy Rift-S provider path requires the historical
+            // connection bits in addition to the standard status bits. Do not
+            // withdraw those during WiVRn startup/transient tracking loss;
+            // that makes pnsovr abort platform initialization before frames.
+            // Echo's legacy Rift-S provider path requires the historical
+            // connection bits in addition to the standard status bits. Do not
+            // withdraw those during WiVRn startup/transient tracking loss;
+            // that makes pnsovr abort platform initialization before frames.
+            let status_flags: u32 = 0xe3;
+            if LAST_LOGGED_TRACKING_STATUS.swap(status_flags as i32, Ordering::Relaxed)
+                != status_flags as i32
+            {
+                log_call(&format!(
+                    "ovr_GetTrackingState OpenXR status_flags={status_flags:#x} head_flags={:?}",
+                    session.head_location_flags
+                ));
+            }
             return OvrTrackingState {
                 head_pose: crate::abi::OvrPoseStatef {
                     pose: head_pose,
@@ -341,7 +370,7 @@ pub extern "system" fn ovr_GetTrackingState(
                     },
                     ..Default::default()
                 },
-                status_flags: 0xe3,
+                status_flags,
                 ..Default::default()
             };
         }
@@ -729,6 +758,17 @@ pub unsafe extern "system" fn ovr_EndFrame(
                     eye_fov.viewport[1].pos.x,
                     eye_fov.viewport[1].pos.y,
                 ));
+                log_call(&format!(
+                    "ovr_EndFrame Fov left=({:.3},{:.3},{:.3},{:.3}) right=({:.3},{:.3},{:.3},{:.3})",
+                    eye_fov.fov[0].left_tan,
+                    eye_fov.fov[0].right_tan,
+                    eye_fov.fov[0].up_tan,
+                    eye_fov.fov[0].down_tan,
+                    eye_fov.fov[1].left_tan,
+                    eye_fov.fov[1].right_tan,
+                    eye_fov.fov[1].up_tan,
+                    eye_fov.fov[1].down_tan,
+                ));
             } else {
                 log_call("ovr_EndFrame unsupported layer type");
             }
@@ -1103,10 +1143,37 @@ pub extern "system" fn ovr_GetRenderDesc2(
         eye,
         fov,
         pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
-        hmd_to_eye_offset: OvrVector3f {
-            x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
-            y: 0.0,
-            z: 0.0,
+        hmd_to_eye_offset: {
+            #[cfg(windows)]
+            if let Ok(slot) = XR_D3D12_SESSION.lock() {
+                if let Some(session) = slot.as_ref() {
+                    let eye_pose = session.view_poses[if eye == OVR_EYE_LEFT { 0 } else { 1 }];
+                    let offset =
+                        crate::openxr_backend::hmd_to_eye_offset(session.head_pose, eye_pose);
+                    return OvrEyeRenderDesc {
+                        eye,
+                        fov,
+                        pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
+                        hmd_to_eye_offset: {
+                            log_call(&format!(
+                                "ovr_GetRenderDesc2 eye={} runtime hmd_to_eye=({:.4},{:.4},{:.4})",
+                                eye, offset.x, offset.y, offset.z
+                            ));
+                            OvrVector3f {
+                                x: offset.x,
+                                y: offset.y,
+                                z: offset.z,
+                            }
+                        },
+                        ..OvrEyeRenderDesc::default()
+                    };
+                }
+            }
+            OvrVector3f {
+                x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
+                y: 0.0,
+                z: 0.0,
+            }
         },
         ..OvrEyeRenderDesc::default()
     }
