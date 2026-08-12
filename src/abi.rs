@@ -180,10 +180,23 @@ pub struct OvrTrackerDesc {
 
 /// Prefix common to all LibOVR composition layers.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct OvrLayerHeader {
     pub layer_type: i32,
     pub flags: u32,
+    // CAPI reserves this full 128-byte header tail; omitting it shifts every
+    // EyeFov/EyeFovDepth member and makes submitted viewport data appear zero.
+    pub reserved: [c_char; 128],
+}
+
+impl Default for OvrLayerHeader {
+    fn default() -> Self {
+        Self {
+            layer_type: 0,
+            flags: 0,
+            reserved: [0; 128],
+        }
+    }
 }
 
 /// CAPI 1.94 `ovrLayerEyeFov`, the stereo color layer submitted by Echo.
@@ -193,8 +206,8 @@ pub struct OvrLayerEyeFov {
     pub header: OvrLayerHeader,
     pub color_texture: [OvrTextureSwapChain; 2],
     pub viewport: [OvrRecti; 2],
-    pub render_pose: [OvrPosef; 2],
     pub fov: [OvrFovPort; 2],
+    pub render_pose: [OvrPosef; 2],
     pub sensor_sample_time: f64,
 }
 

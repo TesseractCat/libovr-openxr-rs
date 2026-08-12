@@ -737,7 +737,49 @@ pub unsafe extern "system" fn ovr_EndFrame(
     #[cfg(windows)]
     if let Ok(mut slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_mut() {
-            if let Err(error) = session.end_frame_without_layers() {
+            let submitted_views = if !layer_ptr_list.is_null() && layer_count != 0 {
+                let layer = unsafe { *layer_ptr_list };
+                if !layer.is_null() {
+                    let header = unsafe { &*layer.cast::<OvrLayerHeader>() };
+                    if matches!(header.layer_type, 1 | 2) {
+                        let eye_fov = unsafe { &*layer.cast::<OvrLayerEyeFov>() };
+                        let views = core::array::from_fn(|eye| {
+                            let viewport = eye_fov.viewport[eye];
+                            (
+                                openxr::Rect2Di {
+                                    offset: openxr::Offset2Di {
+                                        x: viewport.pos.x,
+                                        y: viewport.pos.y,
+                                    },
+                                    extent: openxr::Extent2Di {
+                                        width: viewport.size.w,
+                                        height: viewport.size.h,
+                                    },
+                                },
+                                openxr::Fovf {
+                                    angle_left: eye_fov.fov[eye].left_tan.atan(),
+                                    angle_right: eye_fov.fov[eye].right_tan.atan(),
+                                    angle_up: eye_fov.fov[eye].up_tan.atan(),
+                                    angle_down: eye_fov.fov[eye].down_tan.atan(),
+                                },
+                            )
+                        });
+                        // Error/UI submissions contain an all-zero layer. Do
+                        // not pass invalid OpenXR rectangles in that case.
+                        (views
+                            .iter()
+                            .all(|(rect, _)| rect.extent.width > 0 && rect.extent.height > 0))
+                        .then_some(views)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Err(error) = session.end_frame(submitted_views) {
                 log_call(&format!("openxr end frame failed: {error}"));
             }
         }

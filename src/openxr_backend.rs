@@ -1053,21 +1053,28 @@ impl D3d12Session {
         Ok(())
     }
 
-    pub fn end_frame_without_layers(&mut self) -> Result<(), String> {
+    /// Finish the frame using Echo's submitted viewport/FOV. The viewport is
+    /// the dynamic-resolution window. Poses remain runtime-located because
+    /// Echo's legacy `RenderPose` requires a complete ovr_CalcEyePoses path.
+    pub fn end_frame(
+        &mut self,
+        submitted_views: Option<[(openxr::Rect2Di, openxr::Fovf); 2]>,
+    ) -> Result<(), String> {
         if self.frame_begun {
             let state = self
                 .frame_state
                 .take()
                 .expect("frame state set before begin");
             let display_time = state.predicted_display_time;
-            let (_, views) = self
+            let runtime_views = self
                 .session
                 .locate_views(
                     openxr::ViewConfigurationType::PRIMARY_STEREO,
                     display_time,
                     &self.space,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .1;
             if let Some(swapchain) = self.color_swapchain.as_mut() {
                 swapchain
                     .release_image()
@@ -1077,20 +1084,16 @@ impl D3d12Session {
             if let (Some(swapchain), Some((width, height))) =
                 (&self.color_swapchain, self.color_extent)
             {
-                let half_width = (width / 2) as i32;
-                let projection_views: Vec<_> = views
-                    .iter()
-                    .take(2)
-                    .enumerate()
-                    .map(|(eye, view)| {
-                        openxr::CompositionLayerProjectionView::new()
-                            .pose(view.pose)
-                            .fov(view.fov)
-                            .sub_image(
-                                openxr::SwapchainSubImage::new()
-                                    .swapchain(swapchain)
-                                    .image_array_index(if width >= 2 { 0 } else { eye as u32 })
-                                    .image_rect(openxr::Rect2Di {
+                let projection_views: Vec<_> = (0..2)
+                    .map(|eye| {
+                        let view = &runtime_views[eye];
+                        let (rect, fov) = submitted_views
+                            .as_ref()
+                            .map(|views| views[eye])
+                            .unwrap_or_else(|| {
+                                let half_width = (width / 2) as i32;
+                                (
+                                    openxr::Rect2Di {
                                         offset: openxr::Offset2Di {
                                             x: eye as i32 * half_width,
                                             y: 0,
@@ -1099,7 +1102,19 @@ impl D3d12Session {
                                             width: half_width,
                                             height: height as i32,
                                         },
-                                    }),
+                                    },
+                                    view.fov,
+                                )
+                            });
+                        let pose = view.pose;
+                        openxr::CompositionLayerProjectionView::new()
+                            .pose(pose)
+                            .fov(fov)
+                            .sub_image(
+                                openxr::SwapchainSubImage::new()
+                                    .swapchain(swapchain)
+                                    .image_array_index(0)
+                                    .image_rect(rect),
                             )
                     })
                     .collect();
