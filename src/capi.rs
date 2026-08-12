@@ -11,10 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::abi::{
     OVR_AUDIO_MAX_DEVICE_STR_SIZE, OVR_EYE_LEFT, OVR_SUCCESS, OvrErrorInfo, OvrEyeRenderDesc,
-    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHmdDesc, OvrInitParams, OvrInputState,
-    OvrLayerEyeFov, OvrLayerHeader, OvrResult, OvrSession, OvrSessionStatus, OvrSizei,
-    OvrTextureSwapChain, OvrTextureSwapChainDesc, OvrTrackerDesc, OvrTrackerPose, OvrTrackingState,
-    OvrVector2f, OvrVector3f, OvrVersionString,
+    OvrEyeType, OvrFovPort, OvrGraphicsLuid, OvrHapticsBuffer, OvrHmdDesc, OvrInitParams,
+    OvrInputState, OvrLayerEyeFov, OvrLayerHeader, OvrResult, OvrSession, OvrSessionStatus,
+    OvrSizei, OvrTextureSwapChain, OvrTextureSwapChainDesc, OvrTrackerDesc, OvrTrackerPose,
+    OvrTrackingState, OvrVector2f, OvrVector3f, OvrVersionString,
 };
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -746,12 +746,45 @@ pub unsafe extern "system" fn ovr_EndFrame(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_SubmitControllerVibration(
+pub unsafe extern "system" fn ovr_SubmitControllerVibration(
     _session: OvrSession,
-    _controller_type: u32,
-    _buffer: *const core::ffi::c_void,
+    controller_type: u32,
+    buffer: *const OvrHapticsBuffer,
 ) -> OvrResult {
     log_call("ovr_SubmitControllerVibration");
+    if buffer.is_null() {
+        return -1005;
+    }
+    let buffer = unsafe { &*buffer };
+    if !(0..=256).contains(&buffer.samples_count)
+        || (buffer.samples_count > 0 && buffer.samples.is_null())
+    {
+        return -1005;
+    }
+    if buffer.samples_count == 0 {
+        return OVR_SUCCESS;
+    }
+    // Touch haptic samples are 8-bit amplitudes at 320 Hz. OpenXR accepts one
+    // amplitude/duration pulse, so preserve the buffer's mean energy and span.
+    let samples = unsafe {
+        core::slice::from_raw_parts(buffer.samples.cast::<u8>(), buffer.samples_count as usize)
+    };
+    let amplitude = samples
+        .iter()
+        .map(|&sample| sample as f32 / 255.0)
+        .sum::<f32>()
+        / samples.len() as f32;
+    let duration = std::time::Duration::from_secs_f64(samples.len() as f64 / 320.0);
+    #[cfg(not(windows))]
+    let _ = (controller_type, amplitude, duration);
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            if let Err(error) = session.submit_haptic(controller_type, amplitude, duration) {
+                log_call(&format!("OpenXR haptic submission failed: {error}"));
+            }
+        }
+    }
     OVR_SUCCESS
 }
 

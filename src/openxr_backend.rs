@@ -39,6 +39,7 @@ pub struct D3d12Session {
     pub secondary_touch_action: openxr::Action<bool>,
     pub thumbstick_touch_action: openxr::Action<bool>,
     pub trigger_touch_action: openxr::Action<bool>,
+    pub haptic_action: openxr::Action<openxr::Haptic>,
     pub trigger_action: openxr::Action<f32>,
     pub squeeze_action: openxr::Action<f32>,
     pub thumbstick_action: openxr::Action<openxr::Vector2f>,
@@ -222,6 +223,9 @@ pub unsafe fn create_d3d12_session(
         .map_err(|error| error.to_string())?;
     let trigger_touch_action = input_action_set
         .create_action::<bool>("trigger_touch", "Trigger touch", &[left_path, right_path])
+        .map_err(|error| error.to_string())?;
+    let haptic_action = input_action_set
+        .create_action::<openxr::Haptic>("haptic", "Haptic output", &[left_path, right_path])
         .map_err(|error| error.to_string())?;
     let trigger_action = input_action_set
         .create_action::<f32>("trigger", "Trigger", &[left_path, right_path])
@@ -407,6 +411,18 @@ pub unsafe fn create_d3d12_session(
                     &thumbstick_action,
                     instance
                         .string_to_path("/user/hand/right/input/thumbstick")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &haptic_action,
+                    instance
+                        .string_to_path("/user/hand/left/output/haptic")
+                        .map_err(|error| error.to_string())?,
+                ),
+                openxr::Binding::new(
+                    &haptic_action,
+                    instance
+                        .string_to_path("/user/hand/right/output/haptic")
                         .map_err(|error| error.to_string())?,
                 ),
             ],
@@ -710,6 +726,7 @@ pub unsafe fn create_d3d12_session(
         secondary_touch_action,
         thumbstick_touch_action,
         trigger_touch_action,
+        haptic_action,
         trigger_action,
         squeeze_action,
         thumbstick_action,
@@ -861,6 +878,34 @@ impl D3d12Session {
         self.color_swapchain = Some(swapchain);
         self.color_extent = Some((width, height));
         Ok(raw_images)
+    }
+
+    pub fn submit_haptic(
+        &self,
+        controller_type: u32,
+        amplitude: f32,
+        duration: std::time::Duration,
+    ) -> Result<(), String> {
+        let duration = openxr::Duration::try_from(duration).map_err(|error| error.to_string())?;
+        let event = openxr::HapticVibration::new()
+            .amplitude(amplitude.clamp(0.0, 1.0))
+            .frequency(openxr::FREQUENCY_UNSPECIFIED)
+            .duration(duration);
+        for (bit, path) in [
+            (0x0001_u32, "/user/hand/left"),
+            (0x0002_u32, "/user/hand/right"),
+        ] {
+            if controller_type & bit != 0 {
+                let path = self
+                    .instance
+                    .string_to_path(path)
+                    .map_err(|error| error.to_string())?;
+                self.haptic_action
+                    .apply_feedback(&self.session, path, &event)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn wait_frame(&mut self) -> Result<(), String> {

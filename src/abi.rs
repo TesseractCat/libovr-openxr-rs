@@ -136,6 +136,14 @@ pub struct OvrTrackingState {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+pub struct OvrHapticsBuffer {
+    pub samples: *const core::ffi::c_void,
+    pub samples_count: i32,
+    pub submit_mode: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct OvrInputState {
     pub time_in_seconds: f64,
     pub buttons: u32,
