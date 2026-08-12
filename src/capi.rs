@@ -527,7 +527,6 @@ pub unsafe extern "system" fn ovr_GetDevicePoses(
     device_count: i32,
     absolute_time: f64,
     out_device_poses: *mut crate::abi::OvrPoseStatef,
-    out_tracking_state: *mut OvrTrackingState,
 ) -> OvrResult {
     log_call("ovr_GetDevicePoses");
     if device_count < 0
@@ -562,9 +561,6 @@ pub unsafe extern "system" fn ovr_GetDevicePoses(
                 pose.orientation.w,
             ));
         }
-    }
-    if !out_tracking_state.is_null() {
-        unsafe { *out_tracking_state = tracking };
     }
     OVR_SUCCESS
 }
