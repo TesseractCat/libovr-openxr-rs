@@ -6,7 +6,7 @@ set -euo pipefail
 project_root=$(cd "$(dirname "$0")/.." && pwd)
 game_root=$(cd "$project_root/.." && pwd)
 game_exe="$game_root/bin/win10/echovr.exe"
-shim_source="$project_root/target/x86_64-pc-windows-gnu/debug/libovr_openxr.dll"
+shim_source="$project_root/target/x86_64-pc-windows-gnu/release/libovr_openxr.dll"
 shim_target="$game_root/bin/win10/LibOVRRT64_1.dll"
 platform_target="$game_root/bin/win10/LibOVRPlatform64_1.dll"
 if [[ "${1:-}" == "--no-build" ]]; then

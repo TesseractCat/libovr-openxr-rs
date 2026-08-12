@@ -18,4 +18,4 @@ x86_64-w64-mingw32-ar rcs .nix-mingw/libpthread.a
 export RUSTFLAGS="-L native=$PWD/.nix-mingw${RUSTFLAGS:+ $RUSTFLAGS}"
 
 PATH="$toolchain_bin:$PATH" "$toolchain_bin/cargo" build \
-  --target x86_64-pc-windows-gnu "$@"
+  --release --target x86_64-pc-windows-gnu "$@"

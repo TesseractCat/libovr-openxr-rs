@@ -27,7 +27,19 @@ It may also work with other LibOVR titles, but no guarantees.
    The path should be the EchoVR root directory; do not pass the `bin/win10` directory
    itself.
 
-4. Start the game through Proton with a native Linux OpenXR runtime selected.
+4. Generate a local identity configuration if you need one:
+
+   ```sh
+   python3 tools/generate-config.py /path/to/echo-vr
+   ```
+
+   This writes `bin/win10/libovr-openxr.toml`. The script generates a stable
+   local ID and uses it as the organization ID. Keep this file after linking;
+   changing the IDs can make the game treat you as a different user. Use
+   `--force` to replace an existing configuration, or provide `--id`,
+   `--org-id`, and `--oculus-id` explicitly.
+
+5. Start the game through Proton with a native Linux OpenXR runtime selected.
 
 The patcher modifies two game-local files under `bin/win10`:
 
@@ -35,6 +47,10 @@ The patcher modifies two game-local files under `bin/win10`:
   signature check does not reject the compatibility DLLs.
 - `pnsovr.dll`: changes its preloaded-platform failure branch to continue into
   the existing platform API resolution path.
+
+The configuration generator writes beside `echovr.exe`, where the shim looks
+for `libovr-openxr.toml`. It does not modify the Windows registry or contact
+Oculus services.
 
 Both patches are guarded by expected-byte checks and the tool refuses an
 unsupported game build rather than patching it blindly. If either
@@ -85,11 +101,14 @@ From this directory, enter the development shell:
 nix-shell
 ```
 
-Build and run the game through Proton:
+Build the optimized Windows DLL and run the game through Proton:
 
 ```sh
 tools/run-game.sh
 ```
+
+The launcher builds with Cargo's `--release` profile by default. To build the
+DLL without launching the game, run `tools/build-windows.sh` directly.
 
 To reuse an existing DLL:
 

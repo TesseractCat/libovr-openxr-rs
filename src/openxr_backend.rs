@@ -918,6 +918,15 @@ impl D3d12Session {
                     }
                     openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
                         self.running = false;
+                        crate::capi::log_call(&format!(
+                            "OpenXR session state {:?}; exiting game",
+                            changed.state()
+                        ));
+                        // LibOVR has no equivalent asynchronous quit callback
+                        // for this path. Returning success while merely
+                        // stopping frame submission leaves the game alive in
+                        // a broken state, so terminate the process explicitly.
+                        std::process::exit(0);
                     }
                     _ => {}
                 }
