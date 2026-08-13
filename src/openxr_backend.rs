@@ -79,7 +79,6 @@ pub struct D3d12Session {
     pub color_swapchain: Option<openxr::Swapchain<openxr::D3D12>>,
     pub color_image: Option<u32>,
     pub color_extent: Option<(u32, u32)>,
-    pub openxr_time_available: bool,
 }
 
 #[cfg(windows)]
@@ -151,8 +150,9 @@ pub unsafe fn create_d3d12_session(
     let mut requested = ExtensionSet::default();
     requested.khr_d3d12_enable = true;
     requested.fb_display_refresh_rate = extensions.fb_display_refresh_rate;
-    requested.khr_win32_convert_performance_counter_time =
-        extensions.khr_win32_convert_performance_counter_time;
+    // Required for translating LibOVR's current-time API to OpenXR's clock.
+    // Current Wine/Proton OpenXR implementations expose this extension.
+    requested.khr_win32_convert_performance_counter_time = true;
     let instance = entry
         .create_instance(
             &ApplicationInfo {
@@ -804,7 +804,6 @@ pub unsafe fn create_d3d12_session(
         color_swapchain: None,
         color_image: None,
         color_extent: None,
-        openxr_time_available: extensions.khr_win32_convert_performance_counter_time,
     })
 }
 
@@ -922,14 +921,12 @@ fn finite_difference_velocity(
 impl D3d12Session {
     /// Return the current time in the same OpenXR clock domain used by frame
     /// predictions and action sampling.
-    pub fn openxr_time_seconds(&self) -> Option<f64> {
-        if !self.openxr_time_available {
-            return None;
-        }
+    pub fn openxr_time_seconds(&self) -> f64 {
         self.instance
             .now()
-            .ok()
-            .map(|time| time.as_nanos() as f64 / 1_000_000_000.0)
+            .expect("XR_KHR_win32_convert_performance_counter_time was requested")
+            .as_nanos() as f64
+            / 1_000_000_000.0
     }
 
     /// Drive OpenXR's session state machine from the LibOVR frame thread.

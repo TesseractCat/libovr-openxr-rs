@@ -54,9 +54,7 @@ fn monotonic_time_seconds() -> f64 {
 fn current_time_seconds() -> f64 {
     if let Ok(slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_ref() {
-            if let Some(time) = session.openxr_time_seconds() {
-                return time;
-            }
+            return session.openxr_time_seconds();
         }
     }
     monotonic_time_seconds()
@@ -471,9 +469,7 @@ pub extern "system" fn ovr_GetInputState(
     #[cfg(windows)]
     if let Ok(slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_ref() {
-            state.time_in_seconds = session
-                .openxr_time_seconds()
-                .unwrap_or_else(monotonic_time_seconds);
+            state.time_in_seconds = session.openxr_time_seconds();
             for hand in 0..2 {
                 // ovrButton: A/B/RThumb/RShoulder and X/Y/LThumb/LShoulder.
                 // The simple-controller select action remains a useful trigger
@@ -1127,9 +1123,7 @@ pub extern "system" fn ovr_GetTimeInSeconds() -> f64 {
     #[cfg(windows)]
     if let Ok(slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_ref() {
-            if let Ok(time) = session.instance.now() {
-                return time.as_nanos() as f64 / 1_000_000_000.0;
-            }
+            return session.openxr_time_seconds();
         }
     }
     current_time_seconds()
