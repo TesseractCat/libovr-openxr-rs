@@ -87,6 +87,120 @@ static ROOM_DATA: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 static MESSAGE_QUEUE: Mutex<Vec<Box<PlatformMessage>>> = Mutex::new(Vec::new());
 static BOOTSTRAP_MESSAGE_SENT: AtomicBool = AtomicBool::new(false);
 
+/// Platform SDK microphone object backed by the Windows default capture
+/// endpoint. Oculus Platform microphone PCM is signed 16-bit mono at 48 kHz;
+/// WASAPI's shared-mode mix format is converted to that representation.
+#[cfg(windows)]
+struct PlatformMicrophone {
+    client: windows::Win32::Media::Audio::IAudioClient,
+    capture: windows::Win32::Media::Audio::IAudioCaptureClient,
+    pending: Vec<i16>,
+    started: bool,
+}
+
+#[cfg(windows)]
+impl PlatformMicrophone {
+    fn create() -> Result<Self, windows::core::Error> {
+        use windows::Win32::Media::Audio::{
+            AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+            MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, eCapture, eConsole,
+        };
+        use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)? };
+        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None)? };
+        // The Platform microphone contract is 48 kHz, mono, signed PCM16.
+        // Shared-mode WASAPI performs any endpoint-specific format conversion,
+        // preventing a 44.1 kHz capture device from sounding sped up when Echo
+        // consumes it as the documented 48 kHz stream.
+        let format = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM as u16,
+            nChannels: 1,
+            nSamplesPerSec: 48_000,
+            nAvgBytesPerSec: 96_000,
+            nBlockAlign: 2,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        };
+        unsafe {
+            client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 0, 0, &format, None)?;
+        }
+        let capture: IAudioCaptureClient = unsafe { client.GetService()? };
+        Ok(Self {
+            client,
+            capture,
+            pending: Vec::new(),
+            started: false,
+        })
+    }
+
+    fn start(&mut self) -> Result<(), windows::core::Error> {
+        if !self.started {
+            unsafe { self.client.Start()? };
+            self.started = true;
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if self.started {
+            let _ = unsafe { self.client.Stop() };
+            self.started = false;
+            self.pending.clear();
+        }
+    }
+
+    fn read_pcm(&mut self, output: &mut [i16]) -> usize {
+        // Echo polls this from its game loop. Replaying samples that accumulated
+        // during a long stalled frame makes voice catch up faster than real
+        // time at the receiver. Keep only the newest data that fits this read.
+        self.pending.clear();
+        while self.pending.len() < output.len() {
+            let packet_size = match unsafe { self.capture.GetNextPacketSize() } {
+                Ok(size) if size != 0 => size,
+                _ => break,
+            };
+            let mut data = core::ptr::null_mut();
+            let mut frames = 0;
+            let mut flags = 0;
+            if unsafe {
+                self.capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+            }
+            .is_err()
+            {
+                break;
+            }
+            if flags & 2 == 0 {
+                let samples = unsafe {
+                    core::slice::from_raw_parts(
+                        data.cast::<i16>(),
+                        packet_size.min(frames) as usize,
+                    )
+                };
+                self.pending.extend_from_slice(samples);
+                if self.pending.len() > output.len() {
+                    let excess = self.pending.len() - output.len();
+                    self.pending.drain(..excess);
+                }
+            } else {
+                self.pending.resize(self.pending.len() + frames as usize, 0);
+                if self.pending.len() > output.len() {
+                    let excess = self.pending.len() - output.len();
+                    self.pending.drain(..excess);
+                }
+            }
+            let _ = unsafe { self.capture.ReleaseBuffer(frames) };
+        }
+        let count = output.len().min(self.pending.len());
+        output[..count].copy_from_slice(&self.pending[..count]);
+        self.pending.drain(..count);
+        count
+    }
+}
+
 fn local_user() -> &'static PlatformUser {
     static USER: std::sync::OnceLock<PlatformUser> = std::sync::OnceLock::new();
     USER.get_or_init(|| PlatformUser {
@@ -773,23 +887,117 @@ pub extern "system" fn ovr_VoipDecoder_GetDecodedPCM(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Microphone_GetPCM(
-    _obj: *const c_void,
-    _buffer: *mut i16,
-    _size: usize,
+pub unsafe extern "system" fn ovr_Microphone_GetPCM(
+    obj: *const c_void,
+    buffer: *mut i16,
+    size: usize,
 ) -> usize {
     crate::capi::log_call("ovr_Microphone_GetPCM");
+    if obj.is_null() || buffer.is_null() || size == 0 {
+        return 0;
+    }
+    #[cfg(windows)]
+    {
+        let microphone = unsafe { &mut *obj.cast_mut().cast::<PlatformMicrophone>() };
+        let output = unsafe { core::slice::from_raw_parts_mut(buffer, size) };
+        return microphone.read_pcm(output);
+    }
+    #[cfg(not(windows))]
+    0
+}
+
+/// Windows Platform SDK always reports zero here; callers should read until
+/// `ovr_Microphone_GetPCM` returns zero instead of sizing from this value.
+#[unsafe(no_mangle)]
+pub extern "system" fn ovr_Microphone_GetNumSamplesAvailable(_obj: *const c_void) -> usize {
+    crate::capi::log_call("ovr_Microphone_GetNumSamplesAvailable");
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Microphone_Start(_obj: *const c_void) {
-    crate::capi::log_call("ovr_Microphone_Start");
+pub extern "system" fn ovr_Microphone_GetOutputBufferMaxSize(_obj: *const c_void) -> usize {
+    crate::capi::log_call("ovr_Microphone_GetOutputBufferMaxSize");
+    // One second of the documented 48 kHz mono output is a practical bounded
+    // ring-buffer capacity for this pull-based WASAPI implementation.
+    48_000
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Microphone_Stop(_obj: *const c_void) {
+pub unsafe extern "system" fn ovr_Microphone_GetPCMFloat(
+    obj: *const c_void,
+    buffer: *mut f32,
+    size: usize,
+) -> usize {
+    crate::capi::log_call("ovr_Microphone_GetPCMFloat");
+    if obj.is_null() || buffer.is_null() || size == 0 {
+        return 0;
+    }
+    #[cfg(windows)]
+    {
+        let microphone = unsafe { &mut *obj.cast_mut().cast::<PlatformMicrophone>() };
+        let mut pcm = vec![0_i16; size];
+        let count = microphone.read_pcm(&mut pcm);
+        let output = unsafe { core::slice::from_raw_parts_mut(buffer, count) };
+        for (output, sample) in output.iter_mut().zip(pcm) {
+            *output = sample as f32 / 32768.0;
+        }
+        return count;
+    }
+    #[cfg(not(windows))]
+    0
+}
+
+#[deprecated(note = "use ovr_Microphone_GetPCMFloat")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_Microphone_ReadData(
+    obj: *const c_void,
+    buffer: *mut f32,
+    size: usize,
+) -> usize {
+    unsafe { ovr_Microphone_GetPCMFloat(obj, buffer, size) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_Microphone_SetAcceptableRecordingDelayHint(
+    _obj: *const c_void,
+    _delay_ms: usize,
+) {
+    crate::capi::log_call("ovr_Microphone_SetAcceptableRecordingDelayHint");
+    // Shared-mode WASAPI chooses buffering; this is an advisory SDK setting.
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_Microphone_SetAudioDataAvailableCallback(
+    obj: *const c_void,
+    callback: Option<unsafe extern "system" fn(*mut c_void)>,
+    user_data: *mut c_void,
+) {
+    crate::capi::log_call("ovr_Microphone_SetAudioDataAvailableCallback");
+    // This pull-based implementation has no dedicated WASAPI event thread,
+    // so callbacks cannot be delivered asynchronously without risking calls
+    // into the game from an unknown thread. Callers can safely poll GetPCM.
+    let _ = (obj, callback, user_data);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_Microphone_Start(obj: *const c_void) {
+    crate::capi::log_call("ovr_Microphone_Start");
+    #[cfg(windows)]
+    if !obj.is_null() {
+        let microphone = unsafe { &mut *obj.cast_mut().cast::<PlatformMicrophone>() };
+        if let Err(error) = microphone.start() {
+            crate::capi::log_call(&format!("ovr_Microphone_Start failed: {error}"));
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ovr_Microphone_Stop(obj: *const c_void) {
     crate::capi::log_call("ovr_Microphone_Stop");
+    #[cfg(windows)]
+    if !obj.is_null() {
+        unsafe { &mut *obj.cast_mut().cast::<PlatformMicrophone>() }.stop();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -817,12 +1025,33 @@ pub extern "system" fn ovr_Voip_DestroyDecoder(_decoder: *mut c_void) {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Microphone_Create() -> *mut c_void {
     crate::capi::log_call("ovr_Microphone_Create");
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+        // COM apartments are thread-local. The game normally calls Create and
+        // uses the handle from this thread; an existing apartment is harmless.
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        return PlatformMicrophone::create()
+            .map(Box::new)
+            .map(Box::into_raw)
+            .map(|microphone| microphone.cast())
+            .unwrap_or_else(|error| {
+                crate::capi::log_call(&format!("ovr_Microphone_Create failed: {error}"));
+                core::ptr::null_mut()
+            });
+    }
+    #[cfg(not(windows))]
     core::ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ovr_Microphone_Destroy(_obj: *mut c_void) {
+pub unsafe extern "system" fn ovr_Microphone_Destroy(obj: *mut c_void) {
     crate::capi::log_call("ovr_Microphone_Destroy");
+    #[cfg(windows)]
+    if !obj.is_null() {
+        let mut microphone = unsafe { Box::from_raw(obj.cast::<PlatformMicrophone>()) };
+        microphone.stop();
+    }
 }
 
 #[unsafe(no_mangle)]
