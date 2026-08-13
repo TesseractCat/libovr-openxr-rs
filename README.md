@@ -88,6 +88,26 @@ Known limitations and active work include:
 Expect crashes, missing functionality, and compatibility changes as testing
 expands and supported applications are added.
 
+### Initialization-order limitations
+
+Some LibOVR queries happen before Echo has supplied its D3D12 device, so the
+shim does not yet have a valid OpenXR graphics session when they run. Those
+first responses use compatibility fallbacks and may be replaced with runtime
+values on later calls:
+
+- `ovr_GetHmdDesc` reports the fallback refresh rate and default display FOV.
+  The refresh rate becomes runtime-derived after the OpenXR session exists.
+- `ovr_GetFovTextureSize` uses the fallback FOV and eye pixel density until
+  runtime view information is available.
+- `ovr_GetRenderDesc2` uses fallback eye poses/IPD until OpenXR supplies valid
+  view poses and FOVs.
+
+This ordering is expected for the current LibOVR startup sequence. It is a
+known area for future improvement, especially if an application caches the
+first descriptor instead of querying it again after session creation. In
+practice, preliminary Echo VR testing indicates that these values are
+re-queried over time, allowing the later runtime-derived values to take effect.
+
 ## Requirements
 
 - NixOS, or a Linux environment that can provide the dependencies in
