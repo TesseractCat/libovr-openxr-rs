@@ -72,10 +72,14 @@ pub struct D3d12Session {
     pub hand_angular_velocity: [openxr::Vector3f; 2],
     pub running: bool,
     pub frame_state: Option<openxr::FrameState>,
+    /// Views located for the current frame. Reuse these at submission so the
+    /// game and compositor receive poses for the same predicted display time.
+    pub frame_views: Option<Vec<openxr::View>>,
     pub frame_begun: bool,
     pub color_swapchain: Option<openxr::Swapchain<openxr::D3D12>>,
     pub color_image: Option<u32>,
     pub color_extent: Option<(u32, u32)>,
+    pub openxr_time_available: bool,
 }
 
 #[cfg(windows)]
@@ -114,6 +118,16 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
     let system = instance
         .system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)
         .map_err(|error| error.to_string())?;
+    if let Ok(views) = instance
+        .enumerate_view_configuration_views(system, openxr::ViewConfigurationType::PRIMARY_STEREO)
+    {
+        if let Some(view) = views.first() {
+            crate::capi::set_openxr_eye_resolution(
+                view.recommended_image_rect_width as i32,
+                view.recommended_image_rect_height as i32,
+            );
+        }
+    }
     let requirements = instance
         .graphics_requirements::<openxr::D3D12>(system)
         .map_err(|error| error.to_string())?;
@@ -136,6 +150,9 @@ pub unsafe fn create_d3d12_session(
     }
     let mut requested = ExtensionSet::default();
     requested.khr_d3d12_enable = true;
+    requested.fb_display_refresh_rate = extensions.fb_display_refresh_rate;
+    requested.khr_win32_convert_performance_counter_time =
+        extensions.khr_win32_convert_performance_counter_time;
     let instance = entry
         .create_instance(
             &ApplicationInfo {
@@ -159,6 +176,11 @@ pub unsafe fn create_d3d12_session(
     let (session, waiter, stream) =
         unsafe { instance.create_session::<openxr::D3D12>(system, &info) }
             .map_err(|error| error.to_string())?;
+    if extensions.fb_display_refresh_rate {
+        if let Ok(rate) = session.get_display_refresh_rate() {
+            crate::capi::set_openxr_refresh_rate(rate);
+        }
+    }
     let identity = openxr::Posef {
         orientation: openxr::Quaternionf {
             x: 0.0,
@@ -777,10 +799,12 @@ pub unsafe fn create_d3d12_session(
         }; 2],
         running: false,
         frame_state: None,
+        frame_views: None,
         frame_begun: false,
         color_swapchain: None,
         color_image: None,
         color_extent: None,
+        openxr_time_available: extensions.khr_win32_convert_performance_counter_time,
     })
 }
 
@@ -896,6 +920,18 @@ fn finite_difference_velocity(
 
 #[cfg(windows)]
 impl D3d12Session {
+    /// Return the current time in the same OpenXR clock domain used by frame
+    /// predictions and action sampling.
+    pub fn openxr_time_seconds(&self) -> Option<f64> {
+        if !self.openxr_time_available {
+            return None;
+        }
+        self.instance
+            .now()
+            .ok()
+            .map(|time| time.as_nanos() as f64 / 1_000_000_000.0)
+    }
+
     /// Drive OpenXR's session state machine from the LibOVR frame thread.
     pub fn poll_events(&mut self) -> Result<(), String> {
         let mut storage = openxr::EventDataBuffer::new();
@@ -1034,27 +1070,30 @@ impl D3d12Session {
                 display_time,
                 &self.space,
             ) {
-                for (index, view) in views.iter().take(2).enumerate() {
-                    if valid_orientation(view.pose) {
-                        self.view_poses[index] = view.pose;
-                        self.view_fovs[index] = view.fov;
-                        let previous = self.last_logged_view_poses[index];
-                        if (view.pose.position.x - previous.position.x).abs() > 0.002
-                            || (view.pose.position.y - previous.position.y).abs() > 0.002
-                            || (view.pose.position.z - previous.position.z).abs() > 0.002
-                        {
-                            let offset = hmd_to_eye_offset(self.head_pose, view.pose);
-                            crate::capi::log_call(&format!(
-                                "OpenXR {} view pos=({:.3},{:.3},{:.3}) hmd_to_eye=({:.4},{:.4},{:.4})",
-                                if index == 0 { "left" } else { "right" },
-                                view.pose.position.x,
-                                view.pose.position.y,
-                                view.pose.position.z,
-                                offset.x,
-                                offset.y,
-                                offset.z,
-                            ));
-                            self.last_logged_view_poses[index] = view.pose;
+                self.frame_views = Some(views);
+                if let Some(views) = self.frame_views.as_ref() {
+                    for (index, view) in views.iter().take(2).enumerate() {
+                        if valid_orientation(view.pose) {
+                            self.view_poses[index] = view.pose;
+                            self.view_fovs[index] = view.fov;
+                            let previous = self.last_logged_view_poses[index];
+                            if (view.pose.position.x - previous.position.x).abs() > 0.002
+                                || (view.pose.position.y - previous.position.y).abs() > 0.002
+                                || (view.pose.position.z - previous.position.z).abs() > 0.002
+                            {
+                                let offset = hmd_to_eye_offset(self.head_pose, view.pose);
+                                crate::capi::log_call(&format!(
+                                    "OpenXR {} view pos=({:.3},{:.3},{:.3}) hmd_to_eye=({:.4},{:.4},{:.4})",
+                                    if index == 0 { "left" } else { "right" },
+                                    view.pose.position.x,
+                                    view.pose.position.y,
+                                    view.pose.position.z,
+                                    offset.x,
+                                    offset.y,
+                                    offset.z,
+                                ));
+                                self.last_logged_view_poses[index] = view.pose;
+                            }
                         }
                     }
                 }
@@ -1226,15 +1265,20 @@ impl D3d12Session {
                 .take()
                 .expect("frame state set before begin");
             let display_time = state.predicted_display_time;
-            let runtime_views = self
-                .session
-                .locate_views(
-                    openxr::ViewConfigurationType::PRIMARY_STEREO,
-                    display_time,
-                    &self.space,
-                )
-                .map_err(|error| error.to_string())?
-                .1;
+            let runtime_views = if let Some(views) = self.frame_views.take() {
+                views
+            } else {
+                // Defensive fallback for callers that bypass the normal
+                // WaitToBeginFrame -> BeginFrame sequence.
+                self.session
+                    .locate_views(
+                        openxr::ViewConfigurationType::PRIMARY_STEREO,
+                        display_time,
+                        &self.space,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .1
+            };
             if runtime_views.len() >= 2 {
                 crate::capi::log_call(&format!(
                     "OpenXR EndFrame runtime views left=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3}) fov=({:.3},{:.3},{:.3},{:.3}) right=p({:.3},{:.3},{:.3}) q({:.3},{:.3},{:.3},{:.3}) fov=({:.3},{:.3},{:.3},{:.3})",

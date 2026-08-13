@@ -6,8 +6,8 @@
 use core::ffi::c_char;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::time::Instant;
 
 use crate::abi::{
     OVR_AUDIO_MAX_DEVICE_STR_SIZE, OVR_EYE_LEFT, OVR_SUCCESS, OvrErrorInfo, OvrEyeRenderDesc,
@@ -21,10 +21,51 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TRACKING_ORIGIN: AtomicI32 = AtomicI32::new(1);
 static LOGGING_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static LAST_LOGGED_TRACKING_STATUS: AtomicI32 = AtomicI32::new(-1);
+static XR_REFRESH_RATE_BITS: AtomicU32 = AtomicU32::new(90.0f32.to_bits());
+static XR_EYE_WIDTH: AtomicI32 = AtomicI32::new(1832);
+static XR_EYE_HEIGHT: AtomicI32 = AtomicI32::new(1920);
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub(crate) fn set_openxr_refresh_rate(rate: f32) {
+    if rate.is_finite() && rate > 1.0 {
+        XR_REFRESH_RATE_BITS.store(rate.to_bits(), Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn set_openxr_eye_resolution(width: i32, height: i32) {
+    if width > 0 && height > 0 {
+        XR_EYE_WIDTH.store(width, Ordering::Relaxed);
+        XR_EYE_HEIGHT.store(height, Ordering::Relaxed);
+    }
+}
 #[cfg(windows)]
 static XR_ADAPTER_LUID: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
 static SESSION_TOKEN: u8 = 1;
 static VERSION: &[u8] = b"LibOVR OpenXR shim (bootstrap)\0";
+
+fn monotonic_time_seconds() -> f64 {
+    PROCESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+}
+
+#[cfg(windows)]
+fn current_time_seconds() -> f64 {
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            if let Some(time) = session.openxr_time_seconds() {
+                return time;
+            }
+        }
+    }
+    monotonic_time_seconds()
+}
+
+#[cfg(not(windows))]
+fn current_time_seconds() -> f64 {
+    monotonic_time_seconds()
+}
 
 #[repr(C)]
 struct D3d11Texture2dDesc {
@@ -430,10 +471,9 @@ pub extern "system" fn ovr_GetInputState(
     #[cfg(windows)]
     if let Ok(slot) = XR_D3D12_SESSION.lock() {
         if let Some(session) = slot.as_ref() {
-            state.time_in_seconds = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_secs_f64())
-                .unwrap_or_default();
+            state.time_in_seconds = session
+                .openxr_time_seconds()
+                .unwrap_or_else(monotonic_time_seconds);
             for hand in 0..2 {
                 // ovrButton: A/B/RThumb/RShoulder and X/Y/LThumb/LShoulder.
                 // The simple-controller select action remains a useful trigger
@@ -630,9 +670,18 @@ pub extern "system" fn ovr_GetTrackerPose(
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetPredictedDisplayTime(_session: OvrSession, _frame_index: i64) -> f64 {
     log_call("ovr_GetPredictedDisplayTime");
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            if let Some(frame_state) = session.frame_state {
+                // OpenXR XrTime and LibOVR's time values are both expressed
+                // in seconds from a monotonic runtime clock, not wall time.
+                return frame_state.predicted_display_time.as_nanos() as f64 / 1_000_000_000.0;
+            }
+        }
+    }
+    // There is no predicted frame before the graphics session is created.
+    current_time_seconds()
 }
 
 #[unsafe(no_mangle)]
@@ -998,6 +1047,7 @@ pub unsafe extern "system" fn ovr_GetSessionStatus(
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
     log_call("ovr_GetHmdDesc");
+    let refresh_rate = f32::from_bits(XR_REFRESH_RATE_BITS.load(Ordering::Relaxed));
     let mut product = [0; 64];
     for (slot, byte) in product.iter_mut().zip(b"Oculus Rift S") {
         *slot = *byte as c_char;
@@ -1030,10 +1080,13 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
         serial_number: serial,
         firmware_major: 1,
         firmware_minor: 0,
-        resolution: crate::abi::OvrSizei { w: 1832, h: 1920 },
+        resolution: crate::abi::OvrSizei {
+            w: XR_EYE_WIDTH.load(Ordering::Relaxed) * 2,
+            h: XR_EYE_HEIGHT.load(Ordering::Relaxed),
+        },
         default_eye_fov: [left_fov, right_fov],
         max_eye_fov: [left_fov, right_fov],
-        display_refresh_rate: 90,
+        display_refresh_rate: refresh_rate.round() as i32,
         ..unsafe { core::mem::zeroed() }
     }
 }
@@ -1062,9 +1115,15 @@ pub extern "system" fn ovr_GetVersionString() -> OvrVersionString {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_GetTimeInSeconds() -> f64 {
     log_call("ovr_GetTimeInSeconds");
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |duration| duration.as_secs_f64())
+    #[cfg(windows)]
+    if let Ok(slot) = XR_D3D12_SESSION.lock() {
+        if let Some(session) = slot.as_ref() {
+            if let Ok(time) = session.instance.now() {
+                return time.as_nanos() as f64 / 1_000_000_000.0;
+            }
+        }
+    }
+    current_time_seconds()
 }
 
 #[unsafe(no_mangle)]
@@ -1076,8 +1135,14 @@ pub extern "system" fn ovr_GetFovTextureSize(
 ) -> OvrSizei {
     log_call("ovr_GetFovTextureSize");
     let scale = pixels_per_display_pixel.clamp(0.25, 4.0);
-    let width = ((fov.left_tan + fov.right_tan).max(0.1) * 916.0 * scale).ceil() as i32;
-    let height = ((fov.up_tan + fov.down_tan).max(0.1) * 960.0 * scale).ceil() as i32;
+    let width = ((fov.left_tan + fov.right_tan).max(0.1)
+        * XR_EYE_WIDTH.load(Ordering::Relaxed) as f32
+        * scale)
+        .ceil() as i32;
+    let height = ((fov.up_tan + fov.down_tan).max(0.1)
+        * XR_EYE_HEIGHT.load(Ordering::Relaxed) as f32
+        * scale)
+        .ceil() as i32;
     OvrSizei {
         w: width,
         h: height,
@@ -1200,7 +1265,10 @@ pub extern "system" fn ovr_GetRenderDesc2(
     OvrEyeRenderDesc {
         eye,
         fov,
-        pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
+        pixels_per_tan_angle_at_center: OvrVector2f {
+            x: XR_EYE_WIDTH.load(Ordering::Relaxed) as f32,
+            y: XR_EYE_HEIGHT.load(Ordering::Relaxed) as f32,
+        },
         hmd_to_eye_pose: {
             #[cfg(windows)]
             if let Ok(slot) = XR_D3D12_SESSION.lock() {
@@ -1211,7 +1279,10 @@ pub extern "system" fn ovr_GetRenderDesc2(
                     return OvrEyeRenderDesc {
                         eye,
                         fov,
-                        pixels_per_tan_angle_at_center: OvrVector2f { x: 916.0, y: 960.0 },
+                        pixels_per_tan_angle_at_center: OvrVector2f {
+                            x: XR_EYE_WIDTH.load(Ordering::Relaxed) as f32,
+                            y: XR_EYE_HEIGHT.load(Ordering::Relaxed) as f32,
+                        },
                         hmd_to_eye_pose: {
                             log_call(&format!(
                                 "ovr_GetRenderDesc2 eye={} runtime hmd_to_eye=({:.4},{:.4},{:.4})",
