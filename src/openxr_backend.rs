@@ -1231,6 +1231,13 @@ impl D3d12Session {
                 }
             }
             self.last_velocity_sample = Some(now);
+        }
+        Ok(())
+    }
+
+    pub fn begin_frame(&mut self) -> Result<(), String> {
+        if self.frame_state.is_some() {
+            self.stream.begin().map_err(|error| error.to_string())?;
             if let Some(swapchain) = self.color_swapchain.as_mut() {
                 let image = swapchain
                     .acquire_image()
@@ -1240,13 +1247,6 @@ impl D3d12Session {
                     .map_err(|error| error.to_string())?;
                 self.color_image = Some(image);
             }
-        }
-        Ok(())
-    }
-
-    pub fn begin_frame(&mut self) -> Result<(), String> {
-        if self.frame_state.is_some() {
-            self.stream.begin().map_err(|error| error.to_string())?;
             self.frame_begun = true;
         }
         Ok(())

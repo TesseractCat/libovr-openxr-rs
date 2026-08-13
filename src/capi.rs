@@ -767,6 +767,15 @@ pub extern "system" fn ovr_BeginFrame(_session: OvrSession, _frame_index: i64) -
         if let Some(session) = slot.as_mut() {
             if let Err(error) = session.begin_frame() {
                 log_call(&format!("openxr begin frame failed: {error}"));
+            } else if let Some(index) = session.color_image.map(|index| index as i32) {
+                // Acquisition now occurs after xrBeginFrame. Keep LibOVR's
+                // color and depth handles aligned with the image Echo should
+                // render into for this frame.
+                if let Ok(mut chains) = SWAP_CHAINS.lock() {
+                    for chain in chains.iter_mut() {
+                        chain.current_index = index;
+                    }
+                }
             }
         }
     }
