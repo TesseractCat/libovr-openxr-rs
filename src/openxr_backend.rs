@@ -102,6 +102,7 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
     let mut requested = ExtensionSet::default();
     requested.khr_d3d12_enable = true;
     requested.mnd_headless = extensions.mnd_headless;
+    requested.fb_display_refresh_rate = extensions.fb_display_refresh_rate;
     let instance = entry
         .create_instance(
             &ApplicationInfo {
@@ -135,9 +136,10 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
         .map_err(|error| error.to_string())?;
     if extensions.mnd_headless {
         match probe_headless_eye_fovs(&instance, system) {
-            Ok(fovs) => {
-                crate::capi::set_openxr_eye_fovs(fovs);
-                crate::capi::log_call("OpenXR headless probe discovered eye FOV");
+            Ok(views) => {
+                crate::capi::set_openxr_eye_fovs(views.fovs);
+                crate::capi::set_openxr_eye_offsets(views.eye_offsets);
+                crate::capi::log_call("OpenXR headless probe discovered eye FOV and offsets");
             }
             Err(error) => {
                 crate::capi::log_call(&format!("OpenXR headless FOV probe unavailable: {error}"))
@@ -151,14 +153,24 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
 /// Obtain runtime FOV before Echo supplies its D3D12 queue. Core OpenXR only
 /// returns FOV from `xrLocateViews`; XR_MND_headless requires no graphics device.
 #[cfg(windows)]
+struct HeadlessViewData {
+    fovs: [crate::abi::OvrFovPort; 2],
+    eye_offsets: [crate::abi::OvrVector3f; 2],
+}
+
+#[cfg(windows)]
 fn probe_headless_eye_fovs(
     instance: &openxr::Instance,
     system: openxr::SystemId,
-) -> Result<[crate::abi::OvrFovPort; 2], String> {
+) -> Result<HeadlessViewData, String> {
     let info = openxr::headless::SessionCreateInfo {};
     let (session, mut waiter, _stream) =
         unsafe { instance.create_session::<openxr::Headless>(system, &info) }
             .map_err(|error| format!("xrCreateSession (headless): {error}"))?;
+    if let Ok(rate) = session.get_display_refresh_rate() {
+        crate::capi::set_openxr_refresh_rate(rate);
+        crate::capi::log_call(&format!("OpenXR headless probe refresh rate={rate:.1}"));
+    }
     let identity = openxr::Posef {
         orientation: openxr::Quaternionf {
             x: 0.0,
@@ -216,7 +228,23 @@ fn probe_headless_eye_fovs(
                             left_tan: -fov.angle_left.tan(),
                             right_tan: fov.angle_right.tan(),
                         };
-                        return Ok([convert(left.fov), convert(right.fov)]);
+                        let offset = |view: &openxr::View| crate::abi::OvrVector3f {
+                            x: view.pose.position.x,
+                            y: view.pose.position.y,
+                            z: view.pose.position.z,
+                        };
+                        let data = HeadlessViewData {
+                            fovs: [convert(left.fov), convert(right.fov)],
+                            eye_offsets: [offset(left), offset(right)],
+                        };
+                        if let Err(error) = close_headless_session(instance, &session) {
+                            // Do not discard valid descriptor data because a runtime
+                            // declines to complete the optional probe teardown.
+                            crate::capi::log_call(&format!(
+                                "OpenXR headless probe cleanup: {error}"
+                            ));
+                        }
+                        return Ok(data);
                     }
                     openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
                         return Err(format!("headless session entered {:?}", changed.state()));
@@ -227,6 +255,45 @@ fn probe_headless_eye_fovs(
         }
         if std::time::Instant::now() >= deadline {
             return Err("timed out waiting for headless session READY".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Request normal session shutdown after the one-shot headless query. Unlike
+/// `xrDestroySession`, `xrEndSession` is only legal after STOPPING.
+#[cfg(windows)]
+fn close_headless_session(
+    instance: &openxr::Instance,
+    session: &openxr::Session<openxr::Headless>,
+) -> Result<(), String> {
+    session
+        .request_exit()
+        .map_err(|error| format!("xrRequestExitSession: {error}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    let mut event_data = openxr::EventDataBuffer::new();
+    loop {
+        while let Some(event) = instance
+            .poll_event(&mut event_data)
+            .map_err(|error| format!("xrPollEvent during shutdown: {error}"))?
+        {
+            if let openxr::Event::SessionStateChanged(changed) = event {
+                match changed.state() {
+                    openxr::SessionState::STOPPING => {
+                        return session
+                            .end()
+                            .map(|_| ())
+                            .map_err(|error| format!("xrEndSession: {error}"));
+                    }
+                    openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("timed out waiting for STOPPING after xrRequestExitSession".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

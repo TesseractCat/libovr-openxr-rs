@@ -38,6 +38,16 @@ static XR_RIGHT_FOV_TANS: [AtomicU32; 4] = [
     AtomicU32::new(1.0f32.to_bits()),
     AtomicU32::new(1.0f32.to_bits()),
 ];
+static XR_LEFT_EYE_OFFSET: [AtomicU32; 3] = [
+    AtomicU32::new((-0.032f32).to_bits()),
+    AtomicU32::new(0.0f32.to_bits()),
+    AtomicU32::new(0.0f32.to_bits()),
+];
+static XR_RIGHT_EYE_OFFSET: [AtomicU32; 3] = [
+    AtomicU32::new(0.032f32.to_bits()),
+    AtomicU32::new(0.0f32.to_bits()),
+    AtomicU32::new(0.0f32.to_bits()),
+];
 static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub(crate) fn set_openxr_refresh_rate(rate: f32) {
@@ -70,6 +80,28 @@ fn openxr_eye_fov(tans: &[AtomicU32; 4]) -> OvrFovPort {
         down_tan: f32::from_bits(tans[1].load(Ordering::Relaxed)),
         left_tan: f32::from_bits(tans[2].load(Ordering::Relaxed)),
         right_tan: f32::from_bits(tans[3].load(Ordering::Relaxed)),
+    }
+}
+
+pub(crate) fn set_openxr_eye_offsets(offsets: [OvrVector3f; 2]) {
+    for (target, offset) in [
+        (&XR_LEFT_EYE_OFFSET, offsets[0]),
+        (&XR_RIGHT_EYE_OFFSET, offsets[1]),
+    ] {
+        let values = [offset.x, offset.y, offset.z];
+        if values.iter().all(|value| value.is_finite()) {
+            for (slot, value) in target.iter().zip(values) {
+                slot.store(value.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn openxr_eye_offset(offset: &[AtomicU32; 3]) -> OvrVector3f {
+    OvrVector3f {
+        x: f32::from_bits(offset[0].load(Ordering::Relaxed)),
+        y: f32::from_bits(offset[1].load(Ordering::Relaxed)),
+        z: f32::from_bits(offset[2].load(Ordering::Relaxed)),
     }
 }
 #[cfg(windows)]
@@ -1345,10 +1377,10 @@ pub extern "system" fn ovr_GetRenderDesc2(
                     w: 1.0,
                     ..Default::default()
                 },
-                position: OvrVector3f {
-                    x: if eye == OVR_EYE_LEFT { -0.032 } else { 0.032 },
-                    y: 0.0,
-                    z: 0.0,
+                position: if eye == OVR_EYE_LEFT {
+                    openxr_eye_offset(&XR_LEFT_EYE_OFFSET)
+                } else {
+                    openxr_eye_offset(&XR_RIGHT_EYE_OFFSET)
                 },
             }
         },
