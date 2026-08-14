@@ -505,6 +505,11 @@ pub extern "system" fn ovr_GetInputState(
                 state.index_trigger_no_deadzone[hand] = trigger;
                 if session.hand_trigger_touch[hand] || trigger > 0.0 {
                     state.touches |= if hand == 0 { 0x0000_1000 } else { 0x0000_0010 };
+                } else {
+                    // LibOVR exposes pointing separately from trigger contact.
+                    // Echo uses this pose bit for a straight index finger; it
+                    // is not implied by the analog trigger value or grip.
+                    state.touches |= if hand == 0 { 0x0000_2000 } else { 0x0000_0020 };
                 }
                 state.hand_trigger[hand] = session.hand_squeeze[hand];
                 state.hand_trigger_no_deadzone[hand] = session.hand_squeeze[hand];
