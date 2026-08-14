@@ -24,6 +24,20 @@ static LAST_LOGGED_TRACKING_STATUS: AtomicI32 = AtomicI32::new(-1);
 static XR_REFRESH_RATE_BITS: AtomicU32 = AtomicU32::new(90.0f32.to_bits());
 static XR_EYE_WIDTH: AtomicI32 = AtomicI32::new(1832);
 static XR_EYE_HEIGHT: AtomicI32 = AtomicI32::new(1920);
+// Nominal values are retained only when the runtime cannot provide FOV during
+// the early headless probe. Values are positive LibOVR tangent magnitudes.
+static XR_LEFT_FOV_TANS: [AtomicU32; 4] = [
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+];
+static XR_RIGHT_FOV_TANS: [AtomicU32; 4] = [
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+    AtomicU32::new(1.0f32.to_bits()),
+];
 static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub(crate) fn set_openxr_refresh_rate(rate: f32) {
@@ -36,6 +50,26 @@ pub(crate) fn set_openxr_eye_resolution(width: i32, height: i32) {
     if width > 0 && height > 0 {
         XR_EYE_WIDTH.store(width, Ordering::Relaxed);
         XR_EYE_HEIGHT.store(height, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn set_openxr_eye_fovs(fovs: [OvrFovPort; 2]) {
+    for (target, fov) in [(&XR_LEFT_FOV_TANS, fovs[0]), (&XR_RIGHT_FOV_TANS, fovs[1])] {
+        let values = [fov.up_tan, fov.down_tan, fov.left_tan, fov.right_tan];
+        if values.iter().all(|value| value.is_finite() && *value > 0.0) {
+            for (slot, value) in target.iter().zip(values) {
+                slot.store(value.to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn openxr_eye_fov(tans: &[AtomicU32; 4]) -> OvrFovPort {
+    OvrFovPort {
+        up_tan: f32::from_bits(tans[0].load(Ordering::Relaxed)),
+        down_tan: f32::from_bits(tans[1].load(Ordering::Relaxed)),
+        left_tan: f32::from_bits(tans[2].load(Ordering::Relaxed)),
+        right_tan: f32::from_bits(tans[3].load(Ordering::Relaxed)),
     }
 }
 #[cfg(windows)]
@@ -1070,17 +1104,11 @@ pub extern "system" fn ovr_GetHmdDesc(_session: OvrSession) -> OvrHmdDesc {
     for (slot, byte) in serial.iter_mut().zip(b"OPENXR-RIFTS-0001") {
         *slot = *byte as c_char;
     }
-    // The descriptor is requested before Echo supplies its D3D device, so no
-    // OpenXR graphics session/views exist yet. Start with the portable legacy
-    // projection; subsequent render-descriptor requests use cached runtime
-    // view FOV once the session has initialized.
-    let left_fov = OvrFovPort {
-        up_tan: 1.0,
-        down_tan: 1.0,
-        left_tan: 1.0,
-        right_tan: 1.0,
-    };
-    let right_fov = left_fov;
+    // `ovr_Initialize` makes a short XR_MND_headless session when supported,
+    // so Echo receives the runtime projection before it creates its D3D queue.
+    // These remain nominal only if that optional probe is unavailable.
+    let left_fov = openxr_eye_fov(&XR_LEFT_FOV_TANS);
+    let right_fov = openxr_eye_fov(&XR_RIGHT_FOV_TANS);
     OvrHmdDesc {
         hmd_type: 16, // ovrHmd_RiftS
         product_name: product,

@@ -101,6 +101,7 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
     }
     let mut requested = ExtensionSet::default();
     requested.khr_d3d12_enable = true;
+    requested.mnd_headless = extensions.mnd_headless;
     let instance = entry
         .create_instance(
             &ApplicationInfo {
@@ -127,11 +128,108 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
             );
         }
     }
+    // KHR_D3D12_enable requires this query before *any* session creation,
+    // including an XR_MND_headless session on WineOpenXR.
     let requirements = instance
         .graphics_requirements::<openxr::D3D12>(system)
         .map_err(|error| error.to_string())?;
+    if extensions.mnd_headless {
+        match probe_headless_eye_fovs(&instance, system) {
+            Ok(fovs) => {
+                crate::capi::set_openxr_eye_fovs(fovs);
+                crate::capi::log_call("OpenXR headless probe discovered eye FOV");
+            }
+            Err(error) => {
+                crate::capi::log_call(&format!("OpenXR headless FOV probe unavailable: {error}"))
+            }
+        }
+    }
     // Windows LUID is an 8-byte C structure; LibOVR uses the same representation.
     Ok(unsafe { core::mem::transmute(requirements.adapter_luid) })
+}
+
+/// Obtain runtime FOV before Echo supplies its D3D12 queue. Core OpenXR only
+/// returns FOV from `xrLocateViews`; XR_MND_headless requires no graphics device.
+#[cfg(windows)]
+fn probe_headless_eye_fovs(
+    instance: &openxr::Instance,
+    system: openxr::SystemId,
+) -> Result<[crate::abi::OvrFovPort; 2], String> {
+    let info = openxr::headless::SessionCreateInfo {};
+    let (session, mut waiter, _stream) =
+        unsafe { instance.create_session::<openxr::Headless>(system, &info) }
+            .map_err(|error| format!("xrCreateSession (headless): {error}"))?;
+    let identity = openxr::Posef {
+        orientation: openxr::Quaternionf {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        },
+        position: openxr::Vector3f {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    };
+    let view_space = session
+        .create_reference_space(openxr::ReferenceSpaceType::VIEW, identity)
+        .map_err(|error| format!("xrCreateReferenceSpace (VIEW): {error}"))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(750);
+    let mut event_data = openxr::EventDataBuffer::new();
+    loop {
+        while let Some(event) = instance
+            .poll_event(&mut event_data)
+            .map_err(|error| format!("xrPollEvent: {error}"))?
+        {
+            if let openxr::Event::SessionStateChanged(changed) = event {
+                match changed.state() {
+                    openxr::SessionState::READY => {
+                        session
+                            .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
+                            .map_err(|error| format!("xrBeginSession: {error}"))?;
+                        let frame = waiter
+                            .wait()
+                            .map_err(|error| format!("xrWaitFrame: {error}"))?;
+                        // WineOpenXR rejects xrBeginFrame for an MND headless
+                        // session. xrLocateViews only needs a running session and
+                        // the prediction from xrWaitFrame, so do not begin a frame
+                        // that has no layers to submit.
+                        let located = session
+                            .locate_views(
+                                openxr::ViewConfigurationType::PRIMARY_STEREO,
+                                frame.predicted_display_time,
+                                &view_space,
+                            )
+                            .map_err(|error| format!("xrLocateViews: {error}"));
+                        // `xrEndSession` is only valid after a STOPPING event;
+                        // this short-lived probe has not requested exit. Dropping
+                        // the session after collecting the views is sufficient.
+                        let (_, views) = located?;
+                        let [left, right, ..] = views.as_slice() else {
+                            return Err("headless session did not provide stereo views".into());
+                        };
+                        let convert = |fov: openxr::Fovf| crate::abi::OvrFovPort {
+                            up_tan: fov.angle_up.tan(),
+                            down_tan: -fov.angle_down.tan(),
+                            left_tan: -fov.angle_left.tan(),
+                            right_tan: fov.angle_right.tan(),
+                        };
+                        return Ok([convert(left.fov), convert(right.fov)]);
+                    }
+                    openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
+                        return Err(format!("headless session entered {:?}", changed.state()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("timed out waiting for headless session READY".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Create the retained OpenXR session used by the LibOVR frame bridge.
