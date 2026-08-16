@@ -24,8 +24,8 @@ static LAST_LOGGED_TRACKING_STATUS: AtomicI32 = AtomicI32::new(-1);
 static XR_REFRESH_RATE_BITS: AtomicU32 = AtomicU32::new(90.0f32.to_bits());
 static XR_EYE_WIDTH: AtomicI32 = AtomicI32::new(1832);
 static XR_EYE_HEIGHT: AtomicI32 = AtomicI32::new(1920);
-// Nominal values are retained only when the runtime cannot provide FOV during
-// the early headless probe. Values are positive LibOVR tangent magnitudes.
+// Nominal values are used until a cache from a prior real graphics session is
+// available. Values are positive LibOVR tangent magnitudes.
 static XR_LEFT_FOV_TANS: [AtomicU32; 4] = [
     AtomicU32::new(1.0f32.to_bits()),
     AtomicU32::new(1.0f32.to_bits()),
@@ -334,6 +334,18 @@ pub(crate) fn log_call(name: &str) {
 #[unsafe(no_mangle)]
 pub extern "system" fn ovr_Initialize(_params: *const OvrInitParams) -> OvrResult {
     log_call("ovr_Initialize");
+    match crate::hmd_cache::load() {
+        Ok(Some(cache)) => {
+            set_openxr_eye_fovs(cache.fovs());
+            set_openxr_eye_offsets(cache.eye_offsets());
+            let (width, height) = cache.eye_size();
+            set_openxr_eye_resolution(width, height);
+            set_openxr_refresh_rate(cache.refresh_rate());
+            log_call("OpenXR HMD cache loaded");
+        }
+        Ok(None) => log_call("OpenXR HMD cache not found; using startup defaults"),
+        Err(error) => log_call(&format!("OpenXR HMD cache ignored: {error}")),
+    }
     #[cfg(windows)]
     match crate::openxr_backend::d3d12_adapter_luid() {
         Ok(luid) => {

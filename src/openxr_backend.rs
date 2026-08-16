@@ -22,6 +22,7 @@ pub struct OpenXrCapabilities {
 #[cfg(windows)]
 pub struct D3d12Session {
     pub instance: openxr::Instance,
+    pub system: openxr::SystemId,
     pub session: openxr::Session<openxr::D3D12>,
     pub waiter: openxr::FrameWaiter,
     pub stream: openxr::FrameStream<openxr::D3D12>,
@@ -75,6 +76,8 @@ pub struct D3d12Session {
     /// Views located for the current frame. Reuse these at submission so the
     /// game and compositor receive poses for the same predicted display time.
     pub frame_views: Option<Vec<openxr::View>>,
+    /// Avoid filesystem I/O on every frame after capturing valid real views.
+    pub hmd_cache_written: bool,
     pub frame_begun: bool,
     pub color_swapchain: Option<openxr::Swapchain<openxr::D3D12>>,
     pub color_image: Option<u32>,
@@ -101,7 +104,6 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
     }
     let mut requested = ExtensionSet::default();
     requested.khr_d3d12_enable = true;
-    requested.mnd_headless = extensions.mnd_headless;
     requested.fb_display_refresh_rate = extensions.fb_display_refresh_rate;
     let instance = entry
         .create_instance(
@@ -129,174 +131,13 @@ pub fn d3d12_adapter_luid() -> Result<[u8; 8], String> {
             );
         }
     }
-    // KHR_D3D12_enable requires this query before *any* session creation,
-    // including an XR_MND_headless session on WineOpenXR.
     let requirements = instance
         .graphics_requirements::<openxr::D3D12>(system)
         .map_err(|error| error.to_string())?;
-    if extensions.mnd_headless {
-        match probe_headless_eye_fovs(&instance, system) {
-            Ok(views) => {
-                crate::capi::set_openxr_eye_fovs(views.fovs);
-                crate::capi::set_openxr_eye_offsets(views.eye_offsets);
-                crate::capi::log_call("OpenXR headless probe discovered eye FOV and offsets");
-            }
-            Err(error) => {
-                crate::capi::log_call(&format!("OpenXR headless FOV probe unavailable: {error}"))
-            }
-        }
-    }
+    // Do not create a pre-game session: cached data is used at startup, then
+    // refreshed only by the retained real D3D12 session below.
     // Windows LUID is an 8-byte C structure; LibOVR uses the same representation.
     Ok(unsafe { core::mem::transmute(requirements.adapter_luid) })
-}
-
-/// Obtain runtime FOV before Echo supplies its D3D12 queue. Core OpenXR only
-/// returns FOV from `xrLocateViews`; XR_MND_headless requires no graphics device.
-#[cfg(windows)]
-struct HeadlessViewData {
-    fovs: [crate::abi::OvrFovPort; 2],
-    eye_offsets: [crate::abi::OvrVector3f; 2],
-}
-
-#[cfg(windows)]
-fn probe_headless_eye_fovs(
-    instance: &openxr::Instance,
-    system: openxr::SystemId,
-) -> Result<HeadlessViewData, String> {
-    let info = openxr::headless::SessionCreateInfo {};
-    let (session, mut waiter, _stream) =
-        unsafe { instance.create_session::<openxr::Headless>(system, &info) }
-            .map_err(|error| format!("xrCreateSession (headless): {error}"))?;
-    if let Ok(rate) = session.get_display_refresh_rate() {
-        crate::capi::set_openxr_refresh_rate(rate);
-        crate::capi::log_call(&format!("OpenXR headless probe refresh rate={rate:.1}"));
-    }
-    let identity = openxr::Posef {
-        orientation: openxr::Quaternionf {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            w: 1.0,
-        },
-        position: openxr::Vector3f {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
-    };
-    let view_space = session
-        .create_reference_space(openxr::ReferenceSpaceType::VIEW, identity)
-        .map_err(|error| format!("xrCreateReferenceSpace (VIEW): {error}"))?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(750);
-    let mut event_data = openxr::EventDataBuffer::new();
-    loop {
-        while let Some(event) = instance
-            .poll_event(&mut event_data)
-            .map_err(|error| format!("xrPollEvent: {error}"))?
-        {
-            if let openxr::Event::SessionStateChanged(changed) = event {
-                match changed.state() {
-                    openxr::SessionState::READY => {
-                        session
-                            .begin(openxr::ViewConfigurationType::PRIMARY_STEREO)
-                            .map_err(|error| format!("xrBeginSession: {error}"))?;
-                        let frame = waiter
-                            .wait()
-                            .map_err(|error| format!("xrWaitFrame: {error}"))?;
-                        // WineOpenXR rejects xrBeginFrame for an MND headless
-                        // session. xrLocateViews only needs a running session and
-                        // the prediction from xrWaitFrame, so do not begin a frame
-                        // that has no layers to submit.
-                        let located = session
-                            .locate_views(
-                                openxr::ViewConfigurationType::PRIMARY_STEREO,
-                                frame.predicted_display_time,
-                                &view_space,
-                            )
-                            .map_err(|error| format!("xrLocateViews: {error}"));
-                        // `xrEndSession` is only valid after a STOPPING event;
-                        // this short-lived probe has not requested exit. Dropping
-                        // the session after collecting the views is sufficient.
-                        let (_, views) = located?;
-                        let [left, right, ..] = views.as_slice() else {
-                            return Err("headless session did not provide stereo views".into());
-                        };
-                        let convert = |fov: openxr::Fovf| crate::abi::OvrFovPort {
-                            up_tan: fov.angle_up.tan(),
-                            down_tan: -fov.angle_down.tan(),
-                            left_tan: -fov.angle_left.tan(),
-                            right_tan: fov.angle_right.tan(),
-                        };
-                        let offset = |view: &openxr::View| crate::abi::OvrVector3f {
-                            x: view.pose.position.x,
-                            y: view.pose.position.y,
-                            z: view.pose.position.z,
-                        };
-                        let data = HeadlessViewData {
-                            fovs: [convert(left.fov), convert(right.fov)],
-                            eye_offsets: [offset(left), offset(right)],
-                        };
-                        if let Err(error) = close_headless_session(instance, &session) {
-                            // Do not discard valid descriptor data because a runtime
-                            // declines to complete the optional probe teardown.
-                            crate::capi::log_call(&format!(
-                                "OpenXR headless probe cleanup: {error}"
-                            ));
-                        }
-                        return Ok(data);
-                    }
-                    openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
-                        return Err(format!("headless session entered {:?}", changed.state()));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err("timed out waiting for headless session READY".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Request normal session shutdown after the one-shot headless query. Unlike
-/// `xrDestroySession`, `xrEndSession` is only legal after STOPPING.
-#[cfg(windows)]
-fn close_headless_session(
-    instance: &openxr::Instance,
-    session: &openxr::Session<openxr::Headless>,
-) -> Result<(), String> {
-    session
-        .request_exit()
-        .map_err(|error| format!("xrRequestExitSession: {error}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-    let mut event_data = openxr::EventDataBuffer::new();
-    loop {
-        while let Some(event) = instance
-            .poll_event(&mut event_data)
-            .map_err(|error| format!("xrPollEvent during shutdown: {error}"))?
-        {
-            if let openxr::Event::SessionStateChanged(changed) = event {
-                match changed.state() {
-                    openxr::SessionState::STOPPING => {
-                        return session
-                            .end()
-                            .map(|_| ())
-                            .map_err(|error| format!("xrEndSession: {error}"));
-                    }
-                    openxr::SessionState::EXITING | openxr::SessionState::LOSS_PENDING => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err("timed out waiting for STOPPING after xrRequestExitSession".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Create the retained OpenXR session used by the LibOVR frame bridge.
@@ -903,6 +744,7 @@ pub unsafe fn create_d3d12_session(
     ];
     Ok(D3d12Session {
         instance,
+        system,
         session,
         waiter,
         stream,
@@ -965,6 +807,7 @@ pub unsafe fn create_d3d12_session(
         running: false,
         frame_state: None,
         frame_views: None,
+        hmd_cache_written: false,
         frame_begun: false,
         color_swapchain: None,
         color_image: None,
@@ -1092,6 +935,70 @@ impl D3d12Session {
             .expect("XR_KHR_win32_convert_performance_counter_time was requested")
             .as_nanos() as f64
             / 1_000_000_000.0
+    }
+
+    fn cache_live_hmd_data(&mut self, views: &[openxr::View]) {
+        if self.hmd_cache_written || views.len() < 2 {
+            return;
+        }
+        let required_flags = openxr::SpaceLocationFlags::ORIENTATION_VALID
+            | openxr::SpaceLocationFlags::POSITION_VALID;
+        if !self.head_location_flags.contains(required_flags) {
+            return;
+        }
+        let [left, right, ..] = views else {
+            return;
+        };
+        if !valid_orientation(left.pose)
+            || !valid_orientation(right.pose)
+            || ![left.pose.position, right.pose.position]
+                .iter()
+                .all(|position| {
+                    position.x.is_finite() && position.y.is_finite() && position.z.is_finite()
+                })
+        {
+            return;
+        }
+        let Some(view_config) = self
+            .instance
+            .enumerate_view_configuration_views(
+                self.system,
+                openxr::ViewConfigurationType::PRIMARY_STEREO,
+            )
+            .ok()
+            .and_then(|views| views.into_iter().next())
+        else {
+            return;
+        };
+        let refresh_rate = self.session.get_display_refresh_rate().unwrap_or(90.0);
+        let convert_fov = |fov: openxr::Fovf| crate::abi::OvrFovPort {
+            up_tan: fov.angle_up.tan(),
+            down_tan: -fov.angle_down.tan(),
+            left_tan: -fov.angle_left.tan(),
+            right_tan: fov.angle_right.tan(),
+        };
+        let convert_offset = |pose: openxr::Posef| {
+            let offset = hmd_to_eye_offset(self.head_pose, pose);
+            crate::abi::OvrVector3f {
+                x: offset.x,
+                y: offset.y,
+                z: offset.z,
+            }
+        };
+        let Some(cache) = crate::hmd_cache::HmdCache::new(
+            [convert_fov(left.fov), convert_fov(right.fov)],
+            [convert_offset(left.pose), convert_offset(right.pose)],
+            view_config.recommended_image_rect_width as i32,
+            view_config.recommended_image_rect_height as i32,
+            refresh_rate,
+        ) else {
+            return;
+        };
+        self.hmd_cache_written = true;
+        match crate::hmd_cache::save(cache) {
+            Ok(()) => crate::capi::log_call("OpenXR HMD cache saved from live D3D12 views"),
+            Err(error) => crate::capi::log_call(&format!("OpenXR HMD cache save failed: {error}")),
+        }
     }
 
     /// Drive OpenXR's session state machine from the LibOVR frame thread.
@@ -1257,6 +1164,11 @@ impl D3d12Session {
                                 self.last_logged_view_poses[index] = view.pose;
                             }
                         }
+                    }
+                }
+                if !self.hmd_cache_written {
+                    if let Some(views) = self.frame_views.clone() {
+                        self.cache_live_hmd_data(&views);
                     }
                 }
             }
