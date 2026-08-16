@@ -90,23 +90,29 @@ expands and supported applications are added.
 
 ### Initialization-order limitations
 
-Some LibOVR queries happen before Echo has supplied its D3D12 device, so the
-shim does not yet have a valid OpenXR graphics session when they run. Those
-first responses use compatibility fallbacks and may be replaced with runtime
-values on later calls:
+Echo requests its initial display descriptor before it supplies the D3D12
+command queue required to create an OpenXR graphics session. Core OpenXR only
+provides calibrated per-eye FOV and eye offsets through `xrLocateViews`, which
+requires that session. A temporary headless or graphics session is not a safe
+solution: WiVRn can return synthetic headless views and can crash when a second
+graphics session is created.
 
-- `ovr_GetHmdDesc` reports the fallback refresh rate and default display FOV.
-  The refresh rate becomes runtime-derived after the OpenXR session exists.
-- `ovr_GetFovTextureSize` uses the fallback FOV and eye pixel density until
-  runtime view information is available.
-- `ovr_GetRenderDesc2` uses fallback eye poses/IPD until OpenXR supplies valid
-  view poses and FOVs.
+The shim therefore uses a game-local calibration cache:
 
-This ordering is expected for the current LibOVR startup sequence. It is a
-known area for future improvement, especially if an application caches the
-first descriptor instead of querying it again after session creation. In
-practice, preliminary Echo VR testing indicates that these values are
-re-queried over time, allowing the later runtime-derived values to take effect.
+1. On a first launch without a cache, startup descriptor queries use compatible
+   fallback values.
+2. Once Echo has created its retained D3D12 OpenXR session and valid live views
+   are located, the shim stores FOV, eye offsets/IPD, recommended eye size, and
+   refresh rate in `bin/win10/libovr-openxr-hmd-cache.toml` beside
+   `echovr.exe`.
+3. On the next launch, the cache is loaded during `ovr_Initialize`, before
+   Echo's startup `ovr_GetHmdDesc` and render-descriptor queries. This lets
+   Echo build its initial projection from the calibrated values.
+
+After changing headset, OpenXR runtime, or relevant runtime display settings,
+delete `libovr-openxr-hmd-cache.toml` and launch once to regenerate it, then
+restart the game. The cache is only written from the retained real graphics
+session; no temporary OpenXR session is created.
 
 ## Requirements
 
