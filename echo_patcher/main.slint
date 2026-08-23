@@ -1,0 +1,66 @@
+import { Button, LineEdit, TextEdit } from "std-widgets.slint";
+
+export component EchoPatcher inherits Window {
+    title: "Echo VR OpenXR Patcher";
+    width: 720px;
+    height: 410px;
+
+    in-out property <string> game-directory: "";
+    in-out property <string> oculus-id: "";
+    in-out property <string> status: "Enter the Echo VR game directory and click Inspect.";
+    in-out property <bool> patch-enabled: false;
+    in-out property <color> indicator-color: #c62828;
+    in-out property <string> indicator-text: "Not ready";
+    callback browse();
+    callback inspect(string);
+    callback patch();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        Text { text: "Echo VR OpenXR Patcher"; font-size: 24px; }
+        Text { text: "Game directory:"; }
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> root.game-directory;
+                accepted(value) => { root.inspect(value); }
+            }
+            Button { text: "Choose folder..."; clicked => { root.browse(); } }
+        }
+        Text { text: "Oculus ID (required):"; }
+        LineEdit { text <=> root.oculus-id; placeholder-text: "Enter a local username"; }
+        HorizontalLayout {
+            spacing: 2px;
+            Button {
+                text: "Patch and generate configuration";
+                enabled: root.patch-enabled && root.oculus-id != "";
+                clicked => { root.patch(); }
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "●";
+                color: root.indicator-color;
+                width: 22px;
+                font-size: 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Text {
+                text: root.indicator-text;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+        }
+        Text { text: "Status"; font-weight: 600; }
+        TextEdit {
+            text: root.status;
+            read-only: true;
+            wrap: word-wrap;
+            height: 105px;
+            vertical-stretch: 0;
+        }
+    }
+}

@@ -18,6 +18,8 @@ pkgs.mkShell {
     pkgs.clippy
     pkgs.rustup
     pkgs.pkg-config
+    # Slint's host-side UI compiler discovers fonts through Fontconfig.
+    pkgs.fontconfig
     pkgs.gnumake
     pkgs.cmake
     pkgs.binutils
