@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Echo VR OpenXR Patcher
+Comment=Patch Echo VR for the OpenXR compatibility shim
+Exec=echo_patcher
+Icon=echo_patcher
+Categories=Utility;
+Terminal=false
