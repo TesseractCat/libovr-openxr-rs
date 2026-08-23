@@ -4,6 +4,7 @@ __pycache__
 /.cargo-home
 /.nix-mingw/
 /artifacts/
+result
 vkd3d-proton.cache*
 *.dll
 *.pdb

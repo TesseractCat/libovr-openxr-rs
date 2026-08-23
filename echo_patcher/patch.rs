@@ -58,16 +58,29 @@ fn win10(root: &Path) -> PathBuf {
     root.join("bin").join("win10")
 }
 
-pub fn root_from_executable(path: &Path) -> Option<PathBuf> {
-    let win10 = path.parent()?;
-    if !win10
-        .file_name()?
-        .to_string_lossy()
-        .eq_ignore_ascii_case("win10")
-    {
-        return None;
+/// Resolve an Echo VR root from either the game root or its `bin/win10` directory.
+pub fn root_from_directory(path: &Path) -> Option<PathBuf> {
+    if path.join("bin").join("win10").is_dir() {
+        return Some(path.to_path_buf());
     }
-    win10.parent()?.parent().map(Path::to_path_buf)
+
+    let is_win10 = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("win10"));
+    if is_win10
+        && path.is_dir()
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("bin"))
+    {
+        return path.parent()?.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+pub fn root_from_executable(path: &Path) -> Option<PathBuf> {
+    root_from_directory(path.parent()?)
 }
 
 fn sha256(bytes: &[u8]) -> String {

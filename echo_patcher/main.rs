@@ -1,7 +1,7 @@
 mod patch;
 
 use rand::Rng;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 slint::include_modules!();
 
@@ -65,27 +65,8 @@ fn inspect_installation(window: &EchoPatcher, root: PathBuf) {
 }
 
 fn selected_root(text: &str) -> Result<PathBuf, String> {
-    let selected = PathBuf::from(text.trim());
-    if selected.join("bin").join("win10").is_dir() {
-        return Ok(selected);
-    }
-    let is_win10 = selected
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("win10"));
-    if is_win10
-        && selected.is_dir()
-        && selected
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("bin"))
-    {
-        return selected
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| "Could not find the game directory above bin\\win10.".into());
-    }
-    Err("Choose the Echo VR game directory or its bin\\win10 folder.".into())
+    patch::root_from_directory(&PathBuf::from(text.trim()))
+        .ok_or_else(|| "Choose the Echo VR game directory or its bin\\win10 folder.".into())
 }
 
 fn generated_id() -> u64 {
@@ -95,12 +76,19 @@ fn generated_id() -> u64 {
 fn main() -> Result<(), slint::PlatformError> {
     let window = EchoPatcher::new()?;
 
-    // When deployed beside the game executable, no manual path entry is needed.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(root) = patch::root_from_executable(&exe) {
-            window.set_game_directory(root.display().to_string().into());
-            inspect_installation(&window, root);
-        }
+    // Auto-detect a game root when launched from it, its bin/win10 directory,
+    // or from a patcher copied beside echovr.exe.
+    let launch_root = std::env::current_dir()
+        .ok()
+        .and_then(|dir| patch::root_from_directory(&dir))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| patch::root_from_executable(&exe))
+        });
+    if let Some(root) = launch_root {
+        window.set_game_directory(root.display().to_string().into());
+        inspect_installation(&window, root);
     }
 
     let weak = window.as_weak();
