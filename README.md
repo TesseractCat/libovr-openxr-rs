@@ -15,7 +15,7 @@ It may also work with other LibOVR titles, but no guarantees.
 ## Usage (Echo VR)
 
 1. Download the latest Windows DLLs and the `echo_patcher` release for your
-   platform from the project's GitHub Releases.
+   platform from the project's [GitHub Releases](https://github.com/TesseractCat/libovr-openxr-rs/releases).
 2. Copy `echo_patcher.exe` (Windows) or `echo_patcher-x86_64.AppImage` (Linux),
    `LibOVRRT64_1.dll` and `LibOVRPlatform64_1.dll` into the game's
    `bin/win10` directory.
