@@ -5,32 +5,34 @@
 
 A compatibility layer between the LibOVR API and OpenXR.
 
-Similar to Revive, but since this directly replaces the LibOVR runtime, you don't need to have
-the Oculus software installed.
+Similar to Revive, but since this directly replaces the LibOVR runtime, you
+don't need to have the Oculus software installed.
 
 It is primarily tested with Echo VR, on Linux through Wine/Proton.
 However it should also work on Windows for users who want to use OpenXR directly.
 It may also work with other LibOVR titles, but no guarantees.
 
-## Usage
+## Usage (Echo VR)
 
 1. Download the latest Windows DLLs and the `echo_patcher` release for your
    platform from the project's GitHub Releases.
-2. Copy `LibOVRRT64_1.dll` and `LibOVRPlatform64_1.dll` into the game's
+2. Copy `echo_patcher.exe` (Windows) or `echo_patcher-x86_64.AppImage` (Linux),
+   `LibOVRRT64_1.dll` and `LibOVRPlatform64_1.dll` into the game's
    `bin/win10` directory.
 3. Run `echo_patcher.exe` on Windows or `echo_patcher-x86_64.AppImage` on
-   Linux. Select the Echo VR game root (or its `bin/win10` directory), enter
-   your Oculus ID, then click **Patch and generate configuration**. If the
-   patcher is launched from the game root or `bin/win10`, it detects the game
-   directory automatically.
+   Linux. Enter your desired Oculus ID, then click **Patch and generate configuration**.
 
    The patcher verifies the supported game build, preserves `.original`
    backups, applies both patches, and writes `bin/win10/libovr-openxr.toml`.
-   It retains existing positive local and organization IDs, so keep this file
-   after linking; changing those IDs can make the game treat you as a different
-   user.
 
-4. Start the game through Proton with a native Linux OpenXR runtime selected.
+   You can re-run the patcher to pick a new Oculus ID.
+
+4. On Linux, start the game through Proton with a native Linux OpenXR runtime selected.
+   On Windows, just run echovr.exe. Make sure you have an OpenXR runtime configured.
+
+> **EchoVRCE warning:** The patcher does not currently support the EchoVRCE
+> `pnsovr.dll`. Run it against the original game's `pnsovr.dll`; EchoVRCE
+> itself should still work with the `libovr-openxr-rs` compatibility patch.
 
 ### Manual patching alternative
 
@@ -71,10 +73,6 @@ preserve those original files and use the original game `pnsovr.dll`, not an
 already-patched copy. The release contains
 the compatibility DLLs and patching tool, not the game itself.
 
-> **EchoVRCE warning:** The patcher does not currently support the EchoVRCE
-> `pnsovr.dll`. Run it against the original game's `pnsovr.dll`; EchoVRCE
-> itself should still work with the `libovr-openxr-rs` compatibility patch.
-
 ## Current status
 
 This project is in **alpha**. Most implemented functionality has been tested
@@ -83,9 +81,8 @@ across a broad range of hardware, runtimes, or applications.
 
 Known limitations and active work include:
 
-- Echo's current test target is D3D12, not D3D11.
-- OpenXR frame submission, tracking, input, haptics, and recovery continue to
-  receive testing and development.
+- The patches are currently only designed for Echo VR. You will need to
+  manually design a patch for any other game you wish to use this with.
 - Echo's existing `pnsovr.dll` platform provider remains a compatibility focus;
   the shim supplies platform-export behavior while that call path is refined.
 - Hardware and network behavior have not been validated as a release product.
