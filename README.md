@@ -14,32 +14,37 @@ It may also work with other LibOVR titles, but no guarantees.
 
 ## Usage
 
-1. Download the latest Windows DLLs from the project's GitHub Releases.
+1. Download the latest Windows DLLs and the `echo_patcher` release for your
+   platform from the project's GitHub Releases.
 2. Copy `LibOVRRT64_1.dll` and `LibOVRPlatform64_1.dll` into the game's
    `bin/win10` directory.
-3. From this repository, run the required game patch, providing the game's
-   root directory:
+3. Run `echo_patcher.exe` on Windows or `echo_patcher-x86_64.AppImage` on
+   Linux. Select the Echo VR game root (or its `bin/win10` directory), enter
+   your Oculus ID, then click **Patch and generate configuration**. If the
+   patcher is launched from the game root or `bin/win10`, it detects the game
+   directory automatically.
 
-   ```sh
-   python3 tools/patch-local-binaries.py /path/to/echo-vr
-   ```
+   The patcher verifies the supported game build, preserves `.original`
+   backups, applies both patches, and writes `bin/win10/libovr-openxr.toml`.
+   It retains existing positive local and organization IDs, so keep this file
+   after linking; changing those IDs can make the game treat you as a different
+   user.
 
-   The path should be the EchoVR root directory; do not pass the `bin/win10` directory
-   itself.
+4. Start the game through Proton with a native Linux OpenXR runtime selected.
 
-4. Generate a local identity configuration if you need one:
+### Manual patching alternative
 
-   ```sh
-   python3 tools/generate-config.py /path/to/echo-vr
-   ```
+If the GUI patcher is unavailable, use the scripts from this repository. Run
+both commands against the EchoVR root directory (not `bin/win10` itself):
 
-   This writes `bin/win10/libovr-openxr.toml`. The script generates a stable
-   local ID and uses it as the organization ID. Keep this file after linking;
-   changing the IDs can make the game treat you as a different user. Use
-   `--force` to replace an existing configuration, or provide `--id`,
-   `--org-id`, and `--oculus-id` explicitly.
+```sh
+python3 tools/patch-local-binaries.py /path/to/echo-vr
+python3 tools/generate-config.py /path/to/echo-vr
+```
 
-5. Start the game through Proton with a native Linux OpenXR runtime selected.
+The configuration script writes `bin/win10/libovr-openxr.toml`. Use `--force`
+to replace an existing configuration, or provide `--id`, `--org-id`, and
+`--oculus-id` explicitly.
 
 The patcher modifies two game-local files under `bin/win10`:
 
