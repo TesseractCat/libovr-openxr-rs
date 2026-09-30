@@ -9,7 +9,7 @@ Similar to Revive, but since this directly replaces the LibOVR runtime, you
 don't need to have the Oculus software installed.
 
 It is primarily tested with Echo VR, on Linux through Wine/Proton.
-However it should also work on Windows for users who want to use OpenXR directly.
+However it should also work on Windows for users who want to use OpenXR directly (NOTE: Tested on Windows, did not work. Needs some debugging from someone running Windows).
 It may also work with other LibOVR titles, but no guarantees.
 
 ## Usage (Echo VR)
